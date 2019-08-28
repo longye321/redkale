@@ -7,12 +7,15 @@ package org.redkale.util;
 
 import java.lang.reflect.Array;
 import java.util.*;
-import java.util.function.BiPredicate;
+import java.util.function.*;
+import org.redkale.convert.ConvertDisabled;
 
 /**
  * 该类提供类似JSONObject的数据结构，主要用于读取xml配置文件和http-header存储
  *
- * <p> 详情见: http://redkale.org
+ * <p>
+ * 详情见: https://redkale.org
+ *
  * @author zhangjx
  */
 @SuppressWarnings("unchecked")
@@ -21,64 +24,108 @@ public abstract class AnyValue {
     /**
      * 可读写的AnyValue默认实现类
      *
-     * <p> 详情见: http://redkale.org
      * @author zhangjx
      */
     @SuppressWarnings("unchecked")
     public static final class DefaultAnyValue extends AnyValue {
 
-        public static final BiPredicate<String, String> EQUALS = new BiPredicate<String, String>() { //为了兼容Android
-            @Override
-            public boolean test(String name1, String name2) {
-                return name1.equals(name2);
-            }
-        };
+        /**
+         * 区分name大小写的比较策略
+         *
+         */
+        public static final BiPredicate<String, String> EQUALS = (name1, name2) -> name1.equals(name2);
 
-        public static final BiPredicate<String, String> EQUALSIGNORE = new BiPredicate<String, String>() { //为了兼容Android
-            @Override
-            public boolean test(String name1, String name2) {
-                return name1.equalsIgnoreCase(name2);
-            }
-        };
+        /**
+         * 不区分name大小写的比较策略
+         */
+        public static final BiPredicate<String, String> EQUALSIGNORE = (name1, name2) -> name1.equalsIgnoreCase(name2);
 
-        private final BiPredicate<String, String> predicate;
+        private boolean ignoreCase;
 
-        private Entry<String>[] stringValues = new Entry[0];
+        private BiPredicate<String, String> predicate;
 
-        private Entry<AnyValue>[] entityValues = new Entry[0];
+        private Entry<String>[] stringEntrys = new Entry[0];
 
+        private Entry<DefaultAnyValue>[] anyEntrys = new Entry[0];
+
+        /**
+         * 创建空的DefaultAnyValue对象
+         *
+         * @return DefaultAnyValue对象
+         */
         public static final DefaultAnyValue create() {
             return new DefaultAnyValue();
         }
 
+        /**
+         * 创建含name-value值的DefaultAnyValue对象
+         *
+         * @param name  name
+         * @param value value值
+         *
+         * @return DefaultAnyValue对象
+         */
+        public static final DefaultAnyValue create(String name, Number value) {
+            DefaultAnyValue conf = new DefaultAnyValue();
+            conf.addValue(name, value);
+            return conf;
+        }
+
+        /**
+         * 创建含name-value值的DefaultAnyValue对象
+         *
+         * @param name  name
+         * @param value value值
+         *
+         * @return DefaultAnyValue对象
+         */
         public static final DefaultAnyValue create(String name, String value) {
             DefaultAnyValue conf = new DefaultAnyValue();
             conf.addValue(name, value);
             return conf;
         }
 
+        /**
+         * 创建含name-value值的DefaultAnyValue对象
+         *
+         * @param name  name
+         * @param value value值
+         *
+         * @return DefaultAnyValue对象
+         */
         public static final DefaultAnyValue create(String name, AnyValue value) {
             DefaultAnyValue conf = new DefaultAnyValue();
             conf.addValue(name, value);
             return conf;
         }
 
+        /**
+         * 创建一个区分大小写比较策略的DefaultAnyValue对象
+         *
+         */
         public DefaultAnyValue() {
             this(false);
         }
 
+        /**
+         * 创建DefaultAnyValue对象
+         *
+         * @param ignoreCase name是否不区分大小写
+         */
         public DefaultAnyValue(boolean ignoreCase) {
+            this.ignoreCase = ignoreCase;
             this.predicate = ignoreCase ? EQUALSIGNORE : EQUALS;
         }
 
-        public DefaultAnyValue(BiPredicate<String, String> predicate) {
-            this.predicate = predicate;
-        }
-
+        /**
+         * 创建共享此内容的DefaultAnyValue对象
+         *
+         * @return DefaultAnyValue对象
+         */
         public DefaultAnyValue duplicate() {
-            DefaultAnyValue rs = new DefaultAnyValue(this.predicate);
-            rs.stringValues = this.stringValues;
-            rs.entityValues = this.entityValues;
+            DefaultAnyValue rs = new DefaultAnyValue(this.ignoreCase);
+            rs.stringEntrys = this.stringEntrys;
+            rs.anyEntrys = this.anyEntrys;
             return rs;
         }
 
@@ -86,13 +133,13 @@ public abstract class AnyValue {
             if (av == null) return this;
             if (av instanceof DefaultAnyValue) {
                 final DefaultAnyValue adv = (DefaultAnyValue) av;
-                if (adv.stringValues != null) {
-                    for (Entry<String> en : adv.stringValues) {
+                if (adv.stringEntrys != null) {
+                    for (Entry<String> en : adv.stringEntrys) {
                         this.addValue(en.name, en.value);
                     }
                 }
-                if (adv.entityValues != null) {
-                    for (Entry<AnyValue> en : adv.entityValues) {
+                if (adv.anyEntrys != null) {
+                    for (Entry<DefaultAnyValue> en : adv.anyEntrys) {
                         this.addValue(en.name, en.value);
                     }
                 }
@@ -117,13 +164,13 @@ public abstract class AnyValue {
             if (av == null) return this;
             if (av instanceof DefaultAnyValue) {
                 final DefaultAnyValue adv = (DefaultAnyValue) av;
-                if (adv.stringValues != null) {
-                    for (Entry<String> en : adv.stringValues) {
+                if (adv.stringEntrys != null) {
+                    for (Entry<String> en : adv.stringEntrys) {
                         this.setValue(en.name, en.value);
                     }
                 }
-                if (adv.entityValues != null) {
-                    for (Entry<AnyValue> en : adv.entityValues) {
+                if (adv.anyEntrys != null) {
+                    for (Entry<DefaultAnyValue> en : adv.anyEntrys) {
                         this.setValue(en.name, en.value);
                     }
                 }
@@ -145,22 +192,61 @@ public abstract class AnyValue {
         }
 
         @Override
+        public void forEach(BiConsumer<String, String> stringConsumer) {
+            forEach(stringConsumer, null);
+        }
+
+        @Override
+        public void forEach(BiConsumer<String, String> stringConsumer, BiConsumer<String, AnyValue> anyConsumer) {
+            if (stringConsumer != null) {
+                for (Entry<String> en : stringEntrys) {
+                    stringConsumer.accept(en.name, en.value);
+                }
+            }
+            if (anyConsumer != null) {
+                for (Entry<AnyValue> en : (Entry[]) anyEntrys) {
+                    anyConsumer.accept(en.name, en.value);
+                }
+            }
+        }
+
+        @Override
         public Entry<String>[] getStringEntrys() {
-            return stringValues;
+            return stringEntrys;
+        }
+
+        public void setStringEntrys(Entry<String>[] stringEntrys) {
+            this.stringEntrys = stringEntrys;
         }
 
         @Override
         public Entry<AnyValue>[] getAnyEntrys() {
-            return entityValues;
+            return (Entry<AnyValue>[]) (Entry[]) anyEntrys;
+        }
+
+        public void setAnyEntrys(Entry<DefaultAnyValue>[] anyEntrys) {
+            this.anyEntrys = anyEntrys;
+        }
+
+        public boolean isIgnoreCase() {
+            return ignoreCase;
+        }
+
+        public void setIgnoreCase(boolean ignoreCase) {
+            this.ignoreCase = ignoreCase;
+            if (this.predicate == null) {
+                this.predicate = ignoreCase ? EQUALSIGNORE : EQUALS;
+            }
         }
 
         @Override
+        @ConvertDisabled
         public String[] getNames() {
             Set<String> set = new LinkedHashSet<>();
-            for (Entry en : this.stringValues) {
+            for (Entry en : this.stringEntrys) {
                 set.add(en.name);
             }
-            for (Entry en : this.entityValues) {
+            for (Entry en : this.anyEntrys) {
                 set.add(en.name);
             }
             return set.toArray(new String[set.size()]);
@@ -168,12 +254,12 @@ public abstract class AnyValue {
 
         @Override
         public String[] getValues(String... names) {
-            return Entry.getValues(this.predicate, String.class, this.stringValues, names);
+            return Entry.getValues(this.predicate, String.class, this.stringEntrys, names);
         }
 
         @Override
         public AnyValue[] getAnyValues(String... names) {
-            return Entry.getValues(this.predicate, AnyValue.class, this.entityValues, names);
+            return Entry.getValues(this.predicate, DefaultAnyValue.class, this.anyEntrys, names);
         }
 
         @Override
@@ -182,8 +268,8 @@ public abstract class AnyValue {
         }
 
         public DefaultAnyValue clear() {
-            this.stringValues = new Entry[0];
-            this.entityValues = new Entry[0];
+            this.stringEntrys = new Entry[0];
+            this.anyEntrys = new Entry[0];
             return this;
         }
 
@@ -192,7 +278,7 @@ public abstract class AnyValue {
             if (getValue(name) == null) {
                 this.addValue(name, value);
             } else {
-                for (Entry<String> en : this.stringValues) {
+                for (Entry<String> en : this.stringEntrys) {
                     if (predicate.test(en.name, name)) {
                         en.value = value;
                         return this;
@@ -207,9 +293,9 @@ public abstract class AnyValue {
             if (getValue(name) == null) {
                 this.addValue(name, value);
             } else {
-                for (Entry<AnyValue> en : this.entityValues) {
+                for (Entry<DefaultAnyValue> en : this.anyEntrys) {
                     if (predicate.test(en.name, name)) {
-                        en.value = value;
+                        en.value = (DefaultAnyValue) value;
                         return this;
                     }
                 }
@@ -217,29 +303,40 @@ public abstract class AnyValue {
             return this;
         }
 
+        public DefaultAnyValue addValue(String name, boolean value) {
+            return addValue(name, String.valueOf(value));
+        }
+
+        public DefaultAnyValue addValue(String name, Number value) {
+            return addValue(name, String.valueOf(value));
+        }
+
         public DefaultAnyValue addValue(String name, String value) {
-            if (name == null) return this;
-            int len = this.stringValues.length;
-            Entry[] news = new Entry[len + 1];
-            System.arraycopy(this.stringValues, 0, news, 0, len);
-            news[len] = new Entry(name, value);
-            this.stringValues = news;
+            this.stringEntrys = Utility.append(this.stringEntrys, new Entry(name, value));
             return this;
         }
 
         public DefaultAnyValue addValue(String name, AnyValue value) {
             if (name == null || value == null) return this;
-            int len = this.entityValues.length;
-            Entry[] news = new Entry[len + 1];
-            System.arraycopy(this.entityValues, 0, news, 0, len);
-            news[len] = new Entry(name, value);
-            this.entityValues = news;
+            this.anyEntrys = Utility.append(this.anyEntrys, new Entry(name, value));
+            return this;
+        }
+
+        public DefaultAnyValue removeValue(String name, AnyValue value) {
+            if (name == null || value == null || this.anyEntrys == null) return this;
+            this.anyEntrys = Utility.remove(this.anyEntrys, (t) -> name.equals(((Entry) t).name) && ((Entry) t).getValue().equals(value));
+            return this;
+        }
+
+        public DefaultAnyValue removeValue(String name, String value) {
+            if (name == null || value == null || this.stringEntrys == null) return this;
+            this.stringEntrys = Utility.remove(this.stringEntrys, (t) -> name.equals(((Entry) t).name) && ((Entry) t).getValue().equals(value));
             return this;
         }
 
         @Override
         public AnyValue getAnyValue(String name) {
-            for (Entry<AnyValue> en : this.entityValues) {
+            for (Entry<DefaultAnyValue> en : this.anyEntrys) {
                 if (predicate.test(en.name, name)) {
                     return en.value;
                 }
@@ -249,7 +346,7 @@ public abstract class AnyValue {
 
         @Override
         public String getValue(String name) {
-            for (Entry<String> en : this.stringValues) {
+            for (Entry<String> en : this.stringEntrys) {
                 if (predicate.test(en.name, name)) {
                     return en.value;
                 }
@@ -259,12 +356,12 @@ public abstract class AnyValue {
 
         @Override
         public String[] getValues(String name) {
-            return Entry.getValues(this.predicate, String.class, this.stringValues, name);
+            return Entry.getValues(this.predicate, String.class, this.stringEntrys, name);
         }
 
         @Override
         public AnyValue[] getAnyValues(String name) {
-            return Entry.getValues(this.predicate, AnyValue.class, this.entityValues, name);
+            return Entry.getValues(this.predicate, DefaultAnyValue.class, this.anyEntrys, name);
         }
 
     }
@@ -275,9 +372,14 @@ public abstract class AnyValue {
 
         T value;
 
+        @ConstructorParameters({"name", "value"})
         public Entry(String name0, T value0) {
             this.name = name0;
             this.value = value0;
+        }
+
+        public String getName() {
+            return name;
         }
 
         public T getValue() {
@@ -327,13 +429,13 @@ public abstract class AnyValue {
         }
     }
 
-    public static AnyValue create() {
+    public static DefaultAnyValue create() {
         return new DefaultAnyValue();
     }
 
-    protected String toString(int len) {
-        if (len < 0) len = 0;
-        char[] chars = new char[len];
+    public String toString(int indent) { //indent: 缩进长度
+        if (indent < 0) indent = 0;
+        char[] chars = new char[indent];
         Arrays.fill(chars, ' ');
         final String space = new String(chars);
         StringBuilder sb = new StringBuilder();
@@ -342,11 +444,15 @@ public abstract class AnyValue {
             sb.append(space).append("    '").append(en.name).append("': '").append(en.value).append("',\r\n");
         }
         for (Entry<AnyValue> en : getAnyEntrys()) {
-            sb.append(space).append("    '").append(en.name).append("': '").append(en.value.toString(len + 4)).append("',\r\n");
+            sb.append(space).append("    '").append(en.name).append("': '").append(en.value.toString(indent + 4)).append("',\r\n");
         }
         sb.append(space).append('}');
         return sb.toString();
     }
+
+    public abstract void forEach(BiConsumer<String, String> stringConsumer);
+
+    public abstract void forEach(BiConsumer<String, String> stringConsumer, BiConsumer<String, AnyValue> anyConsumer);
 
     public abstract Entry<String>[] getStringEntrys();
 
@@ -381,7 +487,22 @@ public abstract class AnyValue {
 
     public byte getByteValue(String name, byte defaultValue) {
         String value = getValue(name);
-        return value == null || value.length() == 0 ? defaultValue : Byte.decode(value);
+        if (value == null || value.length() == 0) return defaultValue;
+        try {
+            return Byte.decode(value);
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
+    }
+
+    public byte getByteValue(int radix, String name, byte defaultValue) {
+        String value = getValue(name);
+        if (value == null || value.length() == 0) return defaultValue;
+        try {
+            return (radix == 10 ? Byte.decode(value) : Byte.parseByte(value, radix));
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
     }
 
     public char getCharValue(String name) {
@@ -399,7 +520,22 @@ public abstract class AnyValue {
 
     public short getShortValue(String name, short defaultValue) {
         String value = getValue(name);
-        return value == null || value.length() == 0 ? defaultValue : Short.decode(value);
+        if (value == null || value.length() == 0) return defaultValue;
+        try {
+            return Short.decode(value);
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
+    }
+
+    public short getShortValue(int radix, String name, short defaultValue) {
+        String value = getValue(name);
+        if (value == null || value.length() == 0) return defaultValue;
+        try {
+            return (radix == 10 ? Short.decode(value) : Short.parseShort(value, radix));
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
     }
 
     public int getIntValue(String name) {
@@ -408,7 +544,22 @@ public abstract class AnyValue {
 
     public int getIntValue(String name, int defaultValue) {
         String value = getValue(name);
-        return value == null || value.length() == 0 ? defaultValue : Integer.decode(value);
+        if (value == null || value.length() == 0) return defaultValue;
+        try {
+            return Integer.decode(value);
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
+    }
+
+    public int getIntValue(int radix, String name, int defaultValue) {
+        String value = getValue(name);
+        if (value == null || value.length() == 0) return defaultValue;
+        try {
+            return (radix == 10 ? Integer.decode(value) : Integer.parseInt(value, radix));
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
     }
 
     public long getLongValue(String name) {
@@ -417,7 +568,22 @@ public abstract class AnyValue {
 
     public long getLongValue(String name, long defaultValue) {
         String value = getValue(name);
-        return value == null || value.length() == 0 ? defaultValue : Long.decode(value);
+        if (value == null || value.length() == 0) return defaultValue;
+        try {
+            return Long.decode(value);
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
+    }
+
+    public long getLongValue(int radix, String name, long defaultValue) {
+        String value = getValue(name);
+        if (value == null || value.length() == 0) return defaultValue;
+        try {
+            return (radix == 10 ? Long.decode(value) : Long.parseLong(value, radix));
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
     }
 
     public float getFloatValue(String name) {
@@ -426,7 +592,12 @@ public abstract class AnyValue {
 
     public float getFloatValue(String name, float defaultValue) {
         String value = getValue(name);
-        return value == null || value.length() == 0 ? defaultValue : Float.parseFloat(value);
+        if (value == null || value.length() == 0) return defaultValue;
+        try {
+            return Float.parseFloat(value);
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
     }
 
     public double getDoubleValue(String name) {
@@ -435,12 +606,65 @@ public abstract class AnyValue {
 
     public double getDoubleValue(String name, double defaultValue) {
         String value = getValue(name);
-        return value == null || value.length() == 0 ? defaultValue : Double.parseDouble(value);
+        if (value == null || value.length() == 0) return defaultValue;
+        try {
+            return Double.parseDouble(value);
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
     }
 
     public String getValue(String name, String defaultValue) {
         String value = getValue(name);
         return value == null ? defaultValue : value;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+        if (!(other instanceof AnyValue)) return false;
+        AnyValue conf = (AnyValue) other;
+        if (!equals(this.getStringEntrys(), conf.getStringEntrys())) return false;
+        return equals(this.getAnyEntrys(), conf.getAnyEntrys());
+    }
+
+    private static <T> boolean equals(Entry<? extends T>[] entry1, Entry<T>[] entry2) {
+        if ((entry1 == null || entry1.length == 0) && (entry2 == null || entry2.length == 0)) return true;
+        if (entry1.length != entry2.length) return false;
+        for (int i = 0; i < entry1.length; i++) {
+            if (!entry1[i].name.equals(entry2[i].name)) return false;
+            if (!entry1[i].getValue().equals(entry2[i].getValue())) return false;
+        }
+        return true;
+    }
+
+    @Override
+    public int hashCode() {
+        int hash = 7;
+        hash = 19 * hash + Arrays.deepHashCode(this.getStringEntrys());
+        hash = 19 * hash + Arrays.deepHashCode(this.getAnyEntrys());
+        return hash;
+    }
+
+    public String toXML(String rootName) {
+        return toXMLString(new StringBuilder("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n\r\n"), rootName, this, 0).toString();
+    }
+
+    protected static StringBuilder toXMLString(StringBuilder sb, String nodeName, AnyValue conf, int indent) { //indent: 缩进长度
+        if (indent < 0) indent = 0;
+        char[] chars = new char[indent];
+        Arrays.fill(chars, ' ');
+        final String space = new String(chars);
+        Entry<AnyValue>[] anys = conf.getAnyEntrys();
+        sb.append(space).append('<').append(nodeName);
+        for (Entry<String> en : conf.getStringEntrys()) {
+            sb.append(' ').append(en.name).append("=\"").append(en.value).append("\"");
+        }
+        if (anys == null || anys.length == 0) return sb.append("/>\r\n\r\n");
+        sb.append(">\r\n\r\n");
+        for (Entry<AnyValue> en : conf.getAnyEntrys()) {
+            toXMLString(sb, en.name, en.getValue(), indent + 4);
+        }
+        return sb.append(space).append("</").append(nodeName).append(">\r\n\r\n");
     }
 
 }

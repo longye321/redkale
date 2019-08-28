@@ -9,9 +9,10 @@ import java.lang.reflect.*;
 import org.redkale.util.Attribute;
 
 /**
+ * 字段的反序列化操作类
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  * @param <R> Reader输入的子类
@@ -19,7 +20,11 @@ import org.redkale.util.Attribute;
  * @param <F> 字段的数据类型
  */
 @SuppressWarnings("unchecked")
-public final class DeMember<R extends Reader, T, F> implements Comparable<DeMember<R, T, F>> {
+public final class DeMember<R extends Reader, T, F> {
+
+    protected int index;
+
+    protected int position; //从1开始
 
     protected final Attribute<T, F> attribute;
 
@@ -43,6 +48,14 @@ public final class DeMember<R extends Reader, T, F> implements Comparable<DeMemb
         }
     }
 
+    public static <R extends Reader, T, F> DeMember<R, T, F> create(final ConvertFactory factory, final Class<T> clazz, final String fieldname, final Class<F> fieldtype) {
+        return new DeMember<>(Attribute.create(clazz, fieldname, fieldtype), factory.loadDecoder(fieldtype));
+    }
+
+    public static <R extends Reader, T, F> DeMember<R, T, F> create(final Attribute<T, F> attribute, final ConvertFactory factory, final Class<F> fieldtype) {
+        return new DeMember<>(attribute, factory.loadDecoder(fieldtype));
+    }
+
     public final boolean match(String name) {
         return attribute.field().equals(name);
     }
@@ -59,10 +72,23 @@ public final class DeMember<R extends Reader, T, F> implements Comparable<DeMemb
         return this.attribute;
     }
 
-    @Override
-    public final int compareTo(DeMember<R, T, F> o) {
-        if (o == null) return 1;
-        return this.attribute.field().compareTo(o.attribute.field());
+    public Decodeable<R, F> getDecoder() {
+        return decoder;
+    }
+
+    public int getIndex() {
+        return this.index;
+    }
+
+    public int getPosition() {
+        return this.position;
+    }
+
+    public int compareTo(boolean fieldSort, DeMember<R, T, F> o) {
+        if (o == null) return -1;
+        if (this.index != o.index) return (this.index == 0 ? Integer.MAX_VALUE : this.index) - (o.index == 0 ? Integer.MAX_VALUE : o.index);
+        if (this.index != 0) throw new RuntimeException("fields (" + attribute.field() + ", " + o.attribute.field() + ") have same ConvertColumn.index(" + this.index + ") in " + attribute.declaringClass());
+        return fieldSort ? this.attribute.field().compareTo(o.attribute.field()) : 0;
     }
 
     @Override
@@ -70,7 +96,7 @@ public final class DeMember<R extends Reader, T, F> implements Comparable<DeMemb
         if (this == obj) return true;
         if (!(obj instanceof DeMember)) return false;
         DeMember other = (DeMember) obj;
-        return compareTo(other) == 0;
+        return compareTo(true, other) == 0;
     }
 
     @Override
@@ -80,6 +106,6 @@ public final class DeMember<R extends Reader, T, F> implements Comparable<DeMemb
 
     @Override
     public String toString() {
-        return "DeMember{" + "attribute=" + attribute.field() + ", decoder=" + decoder + '}';
+        return "DeMember{" + "attribute=" + attribute.field() + ", decoder=" + (decoder == null ? null : decoder.getClass().getName()) + '}';
     }
 }

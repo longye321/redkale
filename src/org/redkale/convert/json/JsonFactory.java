@@ -10,15 +10,17 @@ import java.math.BigInteger;
 import java.net.*;
 import org.redkale.convert.*;
 import org.redkale.convert.ext.*;
-import org.redkale.util.DLong;
+import org.redkale.util.*;
 
 /**
+ * JSON的ConvertFactory
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  */
+@SuppressWarnings("unchecked")
 public final class JsonFactory extends ConvertFactory<JsonReader, JsonWriter> {
 
     private static final JsonFactory instance = new JsonFactory(null, Boolean.getBoolean("convert.json.tiny"));
@@ -29,6 +31,9 @@ public final class JsonFactory extends ConvertFactory<JsonReader, JsonWriter> {
         instance.register(DLong.class, DLongSimpledCoder.DLongJsonSimpledCoder.instance);
         instance.register(BigInteger.class, BigIntegerSimpledCoder.BigIntegerJsonSimpledCoder.instance);
         instance.register(Serializable.class, instance.loadEncoder(Object.class));
+
+        instance.register(AnyValue.class, instance.loadDecoder(AnyValue.DefaultAnyValue.class));
+        instance.register(AnyValue.class, instance.loadEncoder(AnyValue.DefaultAnyValue.class));
     }
 
     private JsonFactory(JsonFactory parent, boolean tiny) {
@@ -38,6 +43,12 @@ public final class JsonFactory extends ConvertFactory<JsonReader, JsonWriter> {
     @Override
     public JsonFactory tiny(boolean tiny) {
         this.tiny = tiny;
+        return this;
+    }
+
+    @Override
+    public JsonFactory skipAllIgnore(final boolean skipIgnore) {
+        this.registerSkipAllIgnore(skipIgnore);
         return this;
     }
 
@@ -73,5 +84,10 @@ public final class JsonFactory extends ConvertFactory<JsonReader, JsonWriter> {
     @Override
     public boolean isReversible() {
         return false;
+    }
+
+    @Override
+    public boolean isFieldSort() {
+        return true;
     }
 }

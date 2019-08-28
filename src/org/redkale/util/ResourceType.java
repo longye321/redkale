@@ -15,7 +15,7 @@ import java.lang.annotation.*;
  * 若rs.getClass()的类标记了&#64;ResourceType, 则使用&#64;ResourceType.value()的class值进行注入。
  * 
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  */
@@ -25,5 +25,5 @@ import java.lang.annotation.*;
 @Retention(RUNTIME)
 public @interface ResourceType {
 
-    Class[] value();
+    Class value();
 }

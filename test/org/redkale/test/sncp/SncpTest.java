@@ -14,11 +14,10 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 import java.util.logging.LogManager;
 import org.redkale.convert.bson.*;
-import org.redkale.net.Transport;
+import org.redkale.net.TransportFactory;
 import org.redkale.net.sncp.*;
 import org.redkale.service.Service;
 import org.redkale.util.*;
-import org.redkale.watch.WatchFactory;
 
 /**
  *
@@ -68,11 +67,11 @@ public class SncpTest {
 
     public static ObjectPool<ByteBuffer> newBufferPool() {
         return new ObjectPool<>(new AtomicLong(), new AtomicLong(), 16,
-                (Object... params) -> ByteBuffer.allocateDirect(8192), null, (e) -> {
-                    if (e == null || e.isReadOnly() || e.capacity() != 8192) return false;
-                    e.clear();
-                    return true;
-                });
+            (Object... params) -> ByteBuffer.allocateDirect(8192), null, (e) -> {
+                if (e == null || e.isReadOnly() || e.capacity() != 8192) return false;
+                e.clear();
+                return true;
+            });
     }
 
     private static void runClient() throws Exception {
@@ -80,9 +79,9 @@ public class SncpTest {
         Set<InetSocketAddress> set = new LinkedHashSet<>();
         set.add(addr);
         if (port2 > 0) set.add(new InetSocketAddress(myhost, port2));
-        //String name, WatchFactory, ObjectPool<ByteBuffer>, AsynchronousChannelGroup, InetSocketAddress clientAddress, Collection<InetSocketAddress>
-        final Transport transport = new Transport("", WatchFactory.root(), newBufferPool(), newChannelGroup(), null, set);
-        final SncpTestService service = Sncp.createRemoteService(serviceName, null, SncpTestService.class, null, transport);
+        final TransportFactory transFactory = TransportFactory.create(Executors.newSingleThreadExecutor(), newBufferPool(), newChannelGroup());
+        transFactory.addGroupInfo("client", set);
+        final SncpTestIService service = Sncp.createSimpleRemoteService(SncpTestIService.class, transFactory, addr, "client");
         ResourceFactory.root().inject(service);
 
 //        SncpTestBean bean = new SncpTestBean();
@@ -95,9 +94,10 @@ public class SncpTest {
         SncpTestBean callbean = new SncpTestBean();
         callbean.setId(1);
         callbean.setContent("数据X");
+        service.queryLongResult("f", 3,33L);
 
         service.insert(callbean);
-        System.out.println("bean.id应该会被修改： " + callbean);
+        System.out.println("bean.id应该会被修改(id不会是1)： " + callbean);
         System.out.println("---------------------------------------------------");
         final int count = 10;
         final CountDownLatch cld = new CountDownLatch(count);
@@ -132,6 +132,13 @@ public class SncpTest {
             }.start();
         }
         cld.await();
+        final CountDownLatch cld2 = new CountDownLatch(1);
+        final CompletableFuture<String> future = service.queryResultAsync(callbean);
+        future.whenComplete((v, e) -> {
+            cld2.countDown();
+            System.out.println("异步执行完毕: " + v + ", 异常为: " + e);
+        });
+        cld2.await();
         System.out.println("---全部运行完毕---");
         System.exit(0);
     }
@@ -150,11 +157,11 @@ public class SncpTest {
                     SncpServer server = new SncpServer();
                     Set<InetSocketAddress> set = new LinkedHashSet<>();
                     if (port2 > 0) set.add(new InetSocketAddress(myhost, port2));
-                    //String name, WatchFactory, ObjectPool<ByteBuffer>, AsynchronousChannelGroup, InetSocketAddress clientAddress, Collection<InetSocketAddress>
-                    final Transport transport = new Transport("", WatchFactory.root(), newBufferPool(), newChannelGroup(), null, set);
-                    SncpTestService service = Sncp.createLocalService("", null, ResourceFactory.root(), SncpTestService.class, addr, transport, null);
+                    final TransportFactory transFactory = TransportFactory.create(Executors.newSingleThreadExecutor(), newBufferPool(), newChannelGroup());
+                    transFactory.addGroupInfo("server", set);
+                    SncpTestIService service = Sncp.createSimpleLocalService(SncpTestServiceImpl.class, transFactory, addr, "server");
                     ResourceFactory.root().inject(service);
-                    server.addService(new ServiceWrapper(service, "", "", new HashSet<>(), null));
+                    server.addSncpServlet(service);
                     System.out.println(service);
                     AnyValue.DefaultAnyValue conf = new AnyValue.DefaultAnyValue();
                     conf.addValue("host", "0.0.0.0");
@@ -184,10 +191,11 @@ public class SncpTest {
                     SncpServer server = new SncpServer();
                     Set<InetSocketAddress> set = new LinkedHashSet<>();
                     set.add(new InetSocketAddress(myhost, port));
-                    //String name, WatchFactory, ObjectPool<ByteBuffer>, AsynchronousChannelGroup, InetSocketAddress clientAddress, Collection<InetSocketAddress>
-                    final Transport transport = new Transport("", WatchFactory.root(), newBufferPool(), newChannelGroup(), null, set);
-                    Service service = Sncp.createLocalService("", null, ResourceFactory.root(), SncpTestService.class, addr, transport, null);
-                    server.addService(new ServiceWrapper(service, "", "", new HashSet<>(), null));
+
+                    final TransportFactory transFactory = TransportFactory.create(Executors.newSingleThreadExecutor(), newBufferPool(), newChannelGroup());
+                    transFactory.addGroupInfo("server", set);
+                    Service service = Sncp.createSimpleLocalService(SncpTestServiceImpl.class, transFactory, addr, "server");
+                    server.addSncpServlet(service);
                     AnyValue.DefaultAnyValue conf = new AnyValue.DefaultAnyValue();
                     conf.addValue("host", "0.0.0.0");
                     conf.addValue("port", "" + port2);
@@ -201,4 +209,5 @@ public class SncpTest {
         }.start();
         cdl.await();
     }
+
 }

@@ -6,115 +6,142 @@
 package org.redkale.source;
 
 import java.io.Serializable;
+import org.redkale.util.Comment;
 
 /**
+ * 翻页对象, offset从0开始, limit必须大于0
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  */
 public final class Flipper implements Serializable, Cloneable {
 
-    public static int DEFAULT_PAGESIZE = 20;
+    public static int DEFAULT_LIMIT = 20;
 
-    private int size = DEFAULT_PAGESIZE;
+    @Comment("每页多少行")
+    private int limit = DEFAULT_LIMIT;
 
-    private int page = 1;
+    @Comment("记录行的偏移量，从0开始")
+    private int offset = 0;
 
+    @Comment("排序字段, 可多字段排序")
     private String sort = "";
 
     public Flipper() {
     }
 
-    public Flipper(int pageSize) {
-        this.size = pageSize;
+    public Flipper(int limit) {
+        this.limit = limit > 0 ? limit : 0;
     }
 
     public Flipper(String sortColumn) {
         this.sort = sortColumn;
     }
 
-    public Flipper(int pageSize, int pageNo) {
-        this.size = pageSize;
-        this.page = pageNo;
+    public Flipper(int limit, int offset) {
+        this.limit = limit > 0 ? limit : 0;
+        this.offset = offset < 0 ? 0 : offset;
     }
 
-    public Flipper(int pageSize, int pageNo, String sortColumn) {
-        this.size = pageSize;
-        this.page = pageNo;
+    public Flipper(int limit, String sortColumn) {
+        this.limit = limit > 0 ? limit : 0;
         this.sort = sortColumn;
     }
 
-    public void copyTo(Flipper copy) {
-        if (copy == null) return;
-        copy.page = this.page;
-        copy.size = this.size;
-        copy.sort = this.sort;
+    public Flipper(int limit, int offset, String sortColumn) {
+        this.limit = limit > 0 ? limit : 0;
+        this.offset = offset < 0 ? 0 : offset;
+        this.sort = sortColumn;
     }
 
-    public void copyFrom(Flipper copy) {
-        if (copy == null) return;
-        this.page = copy.page;
-        this.size = copy.size;
+    public Flipper copyTo(Flipper copy) {
+        if (copy == null) return copy;
+        copy.offset = this.offset;
+        copy.limit = this.limit;
+        copy.sort = this.sort;
+        return copy;
+    }
+
+    public Flipper copyFrom(Flipper copy) {
+        if (copy == null) return this;
+        this.offset = copy.offset;
+        this.limit = copy.limit;
         this.sort = copy.sort;
+        return this;
     }
 
     public Flipper next() {
-        this.page++;
+        this.offset = getOffset() + this.limit;
         return this;
     }
 
     @Override
     @SuppressWarnings("CloneDoesntCallSuperClone")
     public Flipper clone() {
-        return new Flipper(this.size, this.page, this.sort);
-    }
-
-    public int index() {
-        return (getPage() - 1) * getSize();
+        return this.copyTo(new Flipper());
     }
 
     @Override
     public String toString() {
-        return this.getClass().getSimpleName() + "{page:" + this.page + ", size=" + this.size + ", sort=" + this.sort + "}";
+        return this.getClass().getSimpleName() + "{offset:" + this.offset + ", limit:" + this.limit + ", sort:" + this.sort + "}";
     }
 
-    public int getSize() {
-        return size;
+    public int getLimit() {
+        return limit;
     }
 
-    public void setSize(int size) {
-        if (size > 0) {
-            this.size = size;
-        }
+    public void setLimit(int limit) {
+        this.limit = limit;
     }
 
-    public int getPage() {
-        return page;
+    public Flipper limit(int limit) {
+        setLimit(limit);
+        return this;
     }
 
-    public void setPage(int page) {
-        if (page >= 0) {
-            this.page = page;
-        }
+    public Flipper unlimit() {
+        this.limit = 0;
+        return this;
+    }
+
+    public int getOffset() {
+        return offset;
+    }
+
+    public void setOffset(int offset) {
+        this.offset = offset < 0 ? 0 : offset;
+    }
+
+    public Flipper offset(int offset) {
+        setOffset(offset);
+        return this;
     }
 
     public String getSort() {
         return sort;
     }
 
-    public Flipper putSortIfEmpty(String sort) {
+    public void setSort(String sort) {
+        this.sort = sort == null ? "" : sort.trim();
+    }
+
+    public Flipper sort(String sort) {
+        setSort(sort);
+        return this;
+    }
+
+    public static Flipper sortIfAbsent(Flipper flipper, String sort) {
+        if (flipper != null) return flipper.sortIfAbsent(sort);
+        return flipper;
+    }
+
+    public Flipper sortIfAbsent(String sort) {
         if (this.sort == null || this.sort.isEmpty()) {
             this.sort = sort;
         }
         return this;
-    }
-
-    public void setSort(String sort) {
-        if (sort != null) {
-            this.sort = sort.trim();
-        }
     }
 
 }

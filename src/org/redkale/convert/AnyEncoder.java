@@ -6,12 +6,12 @@
 package org.redkale.convert;
 
 import java.lang.reflect.Type;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * 对不明类型的对象进行序列化； BSON序列化时将对象的类名写入Writer，JSON则不写入。
  * <p>
- * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  * @param <T> 序列化的泛型类型
@@ -33,6 +33,29 @@ public final class AnyEncoder<T> implements Encodeable<Writer, T> {
         } else {
             if (out.needWriteClassName()) out.writeClassName(factory.getEntityAlias(value.getClass()));
             factory.loadEncoder(value.getClass()).convertTo(out, value);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    public void convertMapTo(final Writer out, final Object... values) {
+        if (values == null) {
+            out.writeNull();
+        } else {
+            int count = values.length - values.length % 2;
+            if (out.writeMapB(count / 2, (Encodeable) this, (Encodeable) this, values) < 0) {
+                for (int i = 0; i < count; i += 2) {
+                    if (i > 0) out.writeArrayMark();
+                    this.convertTo(out, (T) values[i]);
+                    out.writeMapMark();
+                    Object val = values[i + 1];
+                    if (val instanceof CompletableFuture) {
+                        this.convertTo(out, (T) ((CompletableFuture) val).join());
+                    } else {
+                        this.convertTo(out, (T) val);
+                    }
+                }
+            }
+            out.writeMapE();
         }
     }
 

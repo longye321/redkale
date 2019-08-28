@@ -10,9 +10,10 @@ import static java.lang.annotation.RetentionPolicy.RUNTIME;
 import java.lang.annotation.*;
 
 /**
+ * 过滤字段标记
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  */
@@ -37,10 +38,10 @@ public @interface FilterColumn {
     long least() default 1;
 
     /**
-     * express的默认值根据字段类型的不同而不同:
-     * 数组 --&gt; IN
-     * Range --&gt; Between
-     * 其他 --&gt; =
+     * express的默认值根据字段类型的不同而不同:  <br>
+     * 数组 --&gt; IN  <br>
+     * Range --&gt; Between  <br>
+     * 其他 --&gt; =  <br>
      *
      * @return 字段表达式
      */
@@ -52,5 +53,12 @@ public @interface FilterColumn {
      * @return 数组元素间的表达式是否AND关系
      */
     boolean itemand() default true;
+
+    /**
+     * 备注描述
+     *
+     * @return 备注描述
+     */
+    String comment() default "";
 
 }

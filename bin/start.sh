@@ -8,7 +8,11 @@ export LC_ALL="zh_CN.UTF-8"
 
 APP_HOME=`dirname "$0"`
 
-if [ ! -a "$APP_HOME"/conf/application.xml ]; then 
+cd "$APP_HOME"/..
+
+APP_HOME=`pwd`
+
+if [ ! -f "$APP_HOME"/conf/application.xml ]; then 
      APP_HOME="$APP_HOME"/..  
 fi
 
@@ -20,5 +24,5 @@ done
 export CLASSPATH=$CLASSPATH:$lib
 
 echo "$APP_HOME"
-nohup  java -DAPP_HOME="$APP_HOME" org.redkale.boot.Application > "$APP_HOME"/log.out &
+nohup  java -DAPP_HOME="$APP_HOME" org.redkale.boot.Application > "$APP_HOME"/logs.out &
 

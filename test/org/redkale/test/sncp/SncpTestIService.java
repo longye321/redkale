@@ -5,6 +5,7 @@
  */
 package org.redkale.test.sncp;
 
+import java.util.concurrent.CompletableFuture;
 import org.redkale.service.*;
 import org.redkale.source.DataCallArrayAttribute;
 
@@ -16,7 +17,13 @@ public interface SncpTestIService extends Service {
 
     public String queryResult(SncpTestBean bean);
 
-    public void insert(@DynCall(DataCallArrayAttribute.class) SncpTestBean... beans);
+    public double queryDoubleResult(String a, int b, double value);
+    
+    public long queryLongResult(String a, int b, long value);
 
-    public String updateBean(@DynCall(SncpTestService.CallAttribute.class) SncpTestBean bean);
+    public CompletableFuture<String> queryResultAsync(SncpTestBean bean);
+
+    public void insert(@RpcCall(DataCallArrayAttribute.class) SncpTestBean... beans);
+
+    public String updateBean(@RpcCall(SncpTestServiceImpl.CallAttribute.class) SncpTestBean bean);
 }

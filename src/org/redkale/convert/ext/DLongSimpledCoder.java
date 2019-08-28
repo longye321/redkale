@@ -14,7 +14,7 @@ import org.redkale.util.*;
  * Dlong 的SimpledCoder实现
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  * @param <R> Reader输入的子类型
@@ -27,6 +27,7 @@ public final class DLongSimpledCoder<R extends Reader, W extends Writer> extends
     public static final DLongSimpledCoder instance = new DLongSimpledCoder();
 
     @Override
+    @SuppressWarnings("unchecked")
     public void convertTo(final W out, final DLong value) {
         if (value == null) {
             out.writeNull();
@@ -36,6 +37,7 @@ public final class DLongSimpledCoder<R extends Reader, W extends Writer> extends
     }
 
     @Override
+    @SuppressWarnings("unchecked")
     public DLong convertFrom(R in) {
         byte[] bs = bsSimpledCoder.convertFrom(in);
         if (bs == null) return null;

@@ -8,8 +8,11 @@ package org.redkale.net.http;
 import java.util.*;
 
 /**
+ * MimeType
  *
- * <p> 详情见: http://redkale.org
+ * <p>
+ * 详情见: https://redkale.org
+ *
  * @author zhangjx
  */
 public class MimeType {
@@ -57,6 +60,7 @@ public class MimeType {
         contentTypes.put("htm", "text/html");
         contentTypes.put("html", "text/html");
         contentTypes.put("hqx", "application/mac-binhex40");
+        contentTypes.put("ico", "image/x-icon");
         contentTypes.put("ief", "image/ief");
         contentTypes.put("jad", "text/vnd.sun.j2me.app-descriptor");
         contentTypes.put("jar", "application/java-archive");
@@ -66,12 +70,14 @@ public class MimeType {
         contentTypes.put("jpeg", "image/jpeg");
         contentTypes.put("jpg", "image/jpeg");
         contentTypes.put("js", "text/javascript");
+        contentTypes.put("json", "application/json");
         contentTypes.put("kar", "audio/x-midi");
         contentTypes.put("latex", "application/x-latex");
         contentTypes.put("log", "text/plain");
         contentTypes.put("m3u", "audio/x-mpegurl");
         contentTypes.put("mac", "image/x-macpaint");
         contentTypes.put("man", "application/x-troff-man");
+        contentTypes.put("manifest", "text/cache-manifest");
         contentTypes.put("mathml", "application/mathml+xml");
         contentTypes.put("me", "application/x-troff-me");
         contentTypes.put("mid", "audio/x-midi");
@@ -97,6 +103,7 @@ public class MimeType {
         contentTypes.put("oda", "application/oda");
         contentTypes.put("ogg", "application/ogg");
         contentTypes.put("out", "text/plain");
+        contentTypes.put("pac", "application/x-javascript-config");
         contentTypes.put("pbm", "image/x-portable-bitmap");
         contentTypes.put("pct", "image/pict");
         contentTypes.put("pdf", "application/pdf");
@@ -171,20 +178,20 @@ public class MimeType {
     }
 
     public static String get(String extension) {
-        return contentTypes.getOrDefault(extension, "text/plain");
+        return contentTypes.getOrDefault(extension.toLowerCase(), "text/plain");
     }
 
     public static String get(String extension, String defaultCt) {
-        return contentTypes.getOrDefault(extension, defaultCt);
+        return contentTypes.getOrDefault(extension.toLowerCase(), defaultCt);
     }
 
     public static boolean contains(String extension) {
-        return contentTypes.containsKey(extension);
+        return contentTypes.containsKey(extension.toLowerCase());
     }
 
     public static void add(String extension, String contentType) {
         if (extension != null && extension.length() != 0 && contentType != null && contentType.length() != 0) {
-            contentTypes.put(extension, contentType);
+            contentTypes.put(extension.toLowerCase(), contentType);
         }
     }
 
@@ -193,7 +200,7 @@ public class MimeType {
         int newEnd = fileName.lastIndexOf('#');
         if (newEnd == -1) newEnd = length;
         int i = fileName.lastIndexOf('.', newEnd);
-        return (i < 0) ? null : get(fileName.substring(i + 1, newEnd));
+        return (i < 0) ? null : get(fileName.substring(i + 1, newEnd).toLowerCase());
     }
 
 }

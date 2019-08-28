@@ -5,33 +5,46 @@
  */
 package org.redkale.boot;
 
+import java.lang.reflect.Modifier;
 import java.net.*;
 import java.util.*;
-import java.util.logging.*;
+import java.util.logging.Level;
+import org.redkale.boot.ClassFilter.FilterEntry;
 import org.redkale.net.*;
 import org.redkale.net.sncp.*;
+import org.redkale.service.Service;
 import org.redkale.util.*;
+import org.redkale.util.AnyValue.DefaultAnyValue;
 
 /**
+ * SNCP Server节点的配置Server
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  */
 @NodeProtocol({"SNCP"})
-public final class NodeSncpServer extends NodeServer {
+public class NodeSncpServer extends NodeServer {
 
-    private final SncpServer sncpServer;
+    protected final SncpServer sncpServer;
 
-    public NodeSncpServer(Application application, AnyValue serconf) {
+    private NodeSncpServer(Application application, AnyValue serconf) {
         super(application, createServer(application, serconf));
         this.sncpServer = (SncpServer) this.server;
-        this.consumer = sncpServer == null ? null : x -> sncpServer.addService(x);
+        this.consumer = sncpServer == null || application.singletonrun ? null : x -> sncpServer.addSncpServlet(x); //singleton模式下不生成SncpServlet
+    }
+
+    public static NodeServer createNodeServer(Application application, AnyValue serconf) {
+        if (serconf != null && serconf.getAnyValue("rest") != null) {
+            ((AnyValue.DefaultAnyValue) serconf).addValue("_$sncp", "true");
+            return new NodeHttpServer(application, serconf);
+        }
+        return new NodeSncpServer(application, serconf);
     }
 
     private static Server createServer(Application application, AnyValue serconf) {
-        return new SncpServer(application.getStartTime(), application.getWatchFactory());
+        return new SncpServer(application.getStartTime(), application.getResourceFactory().createChild());
     }
 
     @Override
@@ -39,8 +52,8 @@ public final class NodeSncpServer extends NodeServer {
         return sncpServer == null ? null : sncpServer.getSocketAddress();
     }
 
-    public void consumerAccept(ServiceWrapper wrapper) {
-        if (this.consumer != null) this.consumer.accept(wrapper);
+    public void consumerAccept(Service service) {
+        if (this.consumer != null) this.consumer.accept(service);
     }
 
     @Override
@@ -53,7 +66,7 @@ public final class NodeSncpServer extends NodeServer {
         List<SncpServlet> servlets = sncpServer.getSncpServlets();
         Collections.sort(servlets);
         for (SncpServlet en : servlets) {
-            if (sb != null) sb.append(threadName).append(" Loaded ").append(en).append(LINE_SEPARATOR);
+            if (sb != null) sb.append(threadName).append(" Load ").append(en).append(LINE_SEPARATOR);
         }
         if (sb != null && sb.length() > 0) logger.log(Level.FINE, sb.toString());
     }
@@ -68,7 +81,35 @@ public final class NodeSncpServer extends NodeServer {
     }
 
     @Override
-    protected void loadServlet(ClassFilter<? extends Servlet> servletFilter) throws Exception {
+    protected void loadFilter(ClassFilter<? extends Filter> filterFilter, ClassFilter otherFilter) throws Exception {
+        if (sncpServer != null) loadSncpFilter(this.serverConf.getAnyValue("fliters"), filterFilter);
+    }
+
+    @SuppressWarnings("unchecked")
+    protected void loadSncpFilter(final AnyValue servletsConf, final ClassFilter<? extends Filter> classFilter) throws Exception {
+        final StringBuilder sb = logger.isLoggable(Level.INFO) ? new StringBuilder() : null;
+        final String threadName = "[" + Thread.currentThread().getName() + "] ";
+        List<FilterEntry<? extends Filter>> list = new ArrayList(classFilter.getFilterEntrys());
+        for (FilterEntry<? extends Filter> en : list) {
+            Class<SncpFilter> clazz = (Class<SncpFilter>) en.getType();
+            if (Modifier.isAbstract(clazz.getModifiers())) continue;
+            final SncpFilter filter = clazz.getDeclaredConstructor().newInstance();
+            resourceFactory.inject(filter, this);
+            DefaultAnyValue filterConf = (DefaultAnyValue) en.getProperty();
+            this.sncpServer.addSncpFilter(filter, filterConf);
+            if (sb != null) sb.append(threadName).append(" Load ").append(clazz.getName()).append(LINE_SEPARATOR);
+        }
+        if (sb != null && sb.length() > 0) logger.log(Level.INFO, sb.toString());
+    }
+
+    @Override
+    protected void loadServlet(ClassFilter<? extends Servlet> servletFilter, ClassFilter otherFilter) throws Exception {
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    protected ClassFilter<Filter> createFilterClassFilter() {
+        return createClassFilter(null, null, SncpFilter.class, new Class[]{org.redkale.watch.WatchFilter.class}, null, "filters", "filter");
     }
 
     @Override

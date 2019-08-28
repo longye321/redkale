@@ -14,7 +14,7 @@ import java.math.BigInteger;
  * BigInteger 的SimpledCoder实现
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  * @param <R> Reader输入的子类型
@@ -25,6 +25,7 @@ public final class BigIntegerSimpledCoder<R extends Reader, W extends Writer> ex
     public static final BigIntegerSimpledCoder instance = new BigIntegerSimpledCoder();
 
     @Override
+    @SuppressWarnings("unchecked")
     public void convertTo(W out, BigInteger value) {
         if (value == null) {
             out.writeNull();
@@ -34,6 +35,7 @@ public final class BigIntegerSimpledCoder<R extends Reader, W extends Writer> ex
     }
 
     @Override
+    @SuppressWarnings("unchecked")
     public BigInteger convertFrom(R in) {
         byte[] bytes = ByteArraySimpledCoder.instance.convertFrom(in);
         return bytes == null ? null : new BigInteger(bytes);

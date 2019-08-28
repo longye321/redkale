@@ -13,7 +13,7 @@ import org.redkale.convert.SimpledCoder;
  * Type 的SimpledCoder实现 只支持Type的子类Class
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  * @param <R> Reader输入的子类型
@@ -37,8 +37,8 @@ public class TypeSimpledCoder<R extends Reader, W extends Writer> extends Simple
         String str = in.readSmallString();
         if (str == null) return null;
         try {
-            return Class.forName(str);
-        } catch (Exception e) {
+            return Thread.currentThread().getContextClassLoader().loadClass(str);
+        } catch (Throwable e) {
             return null;
         }
     }

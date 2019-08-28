@@ -10,9 +10,10 @@ import java.util.function.*;
 import java.util.regex.*;
 
 /**
+ * 判断字符串数组是否包含或排除指定字符串的操作类
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  */
@@ -69,11 +70,14 @@ public class SelectColumn implements Predicate<String> {
     }
 
     /**
+     * @deprecated
      * class中的字段名
      *
      * @param columns 包含的字段名集合
+     *
      * @return SelectColumn
      */
+    @Deprecated
     public static SelectColumn createIncludes(String... columns) {
         return new SelectColumn(columns, false);
     }
@@ -81,11 +85,90 @@ public class SelectColumn implements Predicate<String> {
     /**
      * class中的字段名
      *
-     * @param columns 排除的字段名集合
+     * @param columns 包含的字段名集合
+     *
      * @return SelectColumn
      */
+    public static SelectColumn includes(String... columns) {
+        return new SelectColumn(columns, false);
+    }
+
+    /**
+     * @deprecated
+     * class中的字段名
+     *
+     * @param cols    包含的字段名集合
+     * @param columns 包含的字段名集合
+     *
+     * @return SelectColumn
+     */
+    @Deprecated
+    public static SelectColumn createIncludes(String[] cols, String... columns) {
+        return new SelectColumn(Utility.append(cols, columns), false);
+    }
+
+    /**
+     * class中的字段名
+     *
+     * @param cols    包含的字段名集合
+     * @param columns 包含的字段名集合
+     *
+     * @return SelectColumn
+     */
+    public static SelectColumn includes(String[] cols, String... columns) {
+        return new SelectColumn(Utility.append(cols, columns), false);
+    }
+
+    /**
+     * @deprecated
+     *
+     * class中的字段名
+     *
+     * @param columns 排除的字段名集合
+     *
+     * @return SelectColumn
+     */
+    @Deprecated
     public static SelectColumn createExcludes(String... columns) {
         return new SelectColumn(columns, true);
+    }
+
+    /**
+     * class中的字段名
+     *
+     * @param columns 排除的字段名集合
+     *
+     * @return SelectColumn
+     */
+    public static SelectColumn excludes(String... columns) {
+        return new SelectColumn(columns, true);
+    }
+
+    /**
+     * @deprecated
+     * class中的字段名
+     *
+     * @param cols    排除的字段名集合
+     * @param columns 排除的字段名集合
+     *
+     * @return SelectColumn
+     */
+    @Deprecated
+    public static SelectColumn createExcludes(String[] cols, String... columns) {
+        return new SelectColumn(Utility.append(cols, columns), true);
+    }
+
+    /**
+     *
+     * class中的字段名
+     *
+     * @param cols    排除的字段名集合
+     * @param columns 排除的字段名集合
+     *
+     * @return SelectColumn
+     */
+    public static SelectColumn excludes(String[] cols, String... columns) {
+        return new SelectColumn(Utility.append(cols, columns), true);
     }
 
     @Override

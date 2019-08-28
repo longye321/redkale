@@ -13,15 +13,14 @@ import org.redkale.convert.*;
 import org.redkale.util.*;
 
 /**
+ * 以ByteBuffer为数据载体的JsonWriter
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  */
 public class JsonByteBufferWriter extends JsonWriter {
-
-    protected static final Charset UTF8 = Charset.forName("UTF-8");
 
     protected Charset charset;
 
@@ -37,7 +36,7 @@ public class JsonByteBufferWriter extends JsonWriter {
 
     protected JsonByteBufferWriter(boolean tiny, Charset charset, Supplier<ByteBuffer> supplier) {
         this.tiny = tiny;
-        this.charset = UTF8.equals(charset) ? null : charset;
+        this.charset = StandardCharsets.UTF_8.equals(charset) ? null : charset;
         this.supplier = supplier;
     }
 
@@ -50,6 +49,7 @@ public class JsonByteBufferWriter extends JsonWriter {
     @Override
     protected boolean recycle() {
         this.index = 0;
+        this.specify = null;
         this.charset = null;
         this.buffers = null;
         return false;
@@ -84,20 +84,14 @@ public class JsonByteBufferWriter extends JsonWriter {
         if (!buffer.hasRemaining()) {
             buffer.flip();
             buffer = supplier.get();
-            ByteBuffer[] bufs = new ByteBuffer[this.buffers.length + 1];
-            System.arraycopy(this.buffers, 0, bufs, 0, this.buffers.length);
-            bufs[this.buffers.length] = buffer;
-            this.buffers = bufs;
+            this.buffers = Utility.append(this.buffers, buffer);
             this.index++;
         }
         int len = buffer.remaining();
         int size = 0;
         while (len < byteLength) {
             buffer = supplier.get();
-            ByteBuffer[] bufs = new ByteBuffer[this.buffers.length + 1];
-            System.arraycopy(this.buffers, 0, bufs, 0, this.buffers.length);
-            bufs[this.buffers.length] = buffer;
-            this.buffers = bufs;
+            this.buffers = Utility.append(this.buffers, buffer);
             len += buffer.remaining();
             size++;
         }
@@ -160,7 +154,7 @@ public class JsonByteBufferWriter extends JsonWriter {
         if (charset == null) { //UTF-8
             final int limit = start + len;
             for (int i = start; i < limit; i++) {
-                buffer = putChar(buffer, chs[i]);
+                buffer = putUTF8Char(buffer, chs[i]);
             }
         } else {
             while (bb.hasRemaining()) {
@@ -174,7 +168,7 @@ public class JsonByteBufferWriter extends JsonWriter {
         }
     }
 
-    private ByteBuffer putChar(ByteBuffer buffer, char c) {
+    private ByteBuffer putUTF8Char(ByteBuffer buffer, char c) {
         if (c < 0x80) {
             if (!buffer.hasRemaining()) buffer = nextByteBuffer();
             buffer.put((byte) c);

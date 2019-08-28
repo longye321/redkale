@@ -9,9 +9,11 @@ import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 
 /**
+ * 简易类的序列化和反序列化操作类   <br>
+ * 能序列化为Boolean、Number或者字符串的类视为简易类  <br>
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  * @param <R> Reader输入的子类
@@ -20,7 +22,7 @@ import java.lang.reflect.Type;
  */
 public abstract class SimpledCoder<R extends Reader, W extends Writer, T> implements Decodeable<R, T>, Encodeable<W, T> {
 
-    private Type type;
+    protected Type type;
 
     @Override
     public abstract void convertTo(final W out, final T value);

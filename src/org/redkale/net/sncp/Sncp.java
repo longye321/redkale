@@ -5,19 +5,20 @@
  */
 package org.redkale.net.sncp;
 
+import org.redkale.asm.MethodDebugVisitor;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.*;
 import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
+import java.nio.channels.CompletionHandler;
 import java.security.*;
 import java.util.*;
-import java.util.function.Consumer;
 import javax.annotation.Resource;
-import static jdk.internal.org.objectweb.asm.ClassWriter.COMPUTE_FRAMES;
-import jdk.internal.org.objectweb.asm.*;
-import static jdk.internal.org.objectweb.asm.Opcodes.*;
-import jdk.internal.org.objectweb.asm.Type;
-import org.redkale.convert.bson.BsonConvert;
-import org.redkale.net.Transport;
+import static org.redkale.asm.ClassWriter.COMPUTE_FRAMES;
+import org.redkale.asm.*;
+import static org.redkale.asm.Opcodes.*;
+import org.redkale.asm.Type;
+import org.redkale.net.TransportFactory;
 import org.redkale.net.sncp.SncpClient.SncpAction;
 import org.redkale.service.*;
 import org.redkale.util.*;
@@ -25,13 +26,17 @@ import org.redkale.util.*;
 /**
  * Service Node Communicate Protocol
  * 生成Service的本地模式或远程模式Service-Class的工具类
- * <p>
- * <p>
- * 详情见: http://redkale.org
+ *
+ *
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  */
 public abstract class Sncp {
+
+    public static final ByteBuffer PING_BUFFER = ByteBuffer.wrap("PING".getBytes()).asReadOnlyBuffer();
+
+    public static final ByteBuffer PONG_BUFFER = ByteBuffer.wrap("PONG".getBytes()).asReadOnlyBuffer();
 
     static final String FIELDPREFIX = "_redkale";
 
@@ -54,11 +59,6 @@ public abstract class Sncp {
     private Sncp() {
     }
 
-    public static long nodeid(InetSocketAddress ip) {
-        byte[] bytes = ip.getAddress().getAddress();
-        return ((0L + ip.getPort()) << 32) | ((0xffffffff & bytes[0]) << 24) | ((0xffffff & bytes[1]) << 16) | ((0xffff & bytes[2]) << 8) | (0xff & bytes[3]);
-    }
-
     public static DLong hash(final java.lang.reflect.Method method) {
         if (method == null) return DLong.ZERO;
         StringBuilder sb = new StringBuilder(); //不能使用method.toString() 因为包含declaringClass信息导致接口与实现类的方法hash不一致
@@ -79,6 +79,7 @@ public abstract class Sncp {
      * 对类名或者name字符串进行hash。
      *
      * @param name String
+     *
      * @return hash值
      */
     public static DLong hash(final String name) {
@@ -95,6 +96,38 @@ public abstract class Sncp {
         return dyn != null && dyn.remote();
     }
 
+    public static boolean isSncpDyn(Service service) {
+        return service.getClass().getAnnotation(SncpDyn.class) != null;
+    }
+
+    public static String getResourceName(Service service) {
+        if (service == null) return null;
+        Resource res = service.getClass().getAnnotation(Resource.class);
+        return res == null ? null : res.name();
+    }
+
+    public static Class getServiceType(Service service) {
+        ResourceType rt = service.getClass().getAnnotation(ResourceType.class);
+        return rt == null ? service.getClass() : rt.value();
+    }
+
+    public static Class getResourceType(Service service) {
+        if (service == null) return null;
+        ResourceType type = service.getClass().getAnnotation(ResourceType.class);
+        return type == null ? getServiceType(service) : type.value();
+    }
+
+    public static AnyValue getConf(Service service) {
+        if (service == null) return null;
+        try {
+            Field ts = service.getClass().getDeclaredField(FIELDPREFIX + "_conf");
+            ts.setAccessible(true);
+            return (AnyValue) ts.get(service);
+        } catch (Exception e) {
+            throw new RuntimeException(service + " not found " + FIELDPREFIX + "_conf");
+        }
+    }
+
     public static SncpClient getSncpClient(Service service) {
         if (service == null) return null;
         try {
@@ -106,143 +139,174 @@ public abstract class Sncp {
         }
     }
 
-    public static Transport getSameGroupTransport(Service service) {
-        if (service == null) return null;
-        try {
-            Field ts = service.getClass().getDeclaredField(FIELDPREFIX + "_sameGroupTransport");
-            ts.setAccessible(true);
-            return (Transport) ts.get(service);
-        } catch (Exception e) {
-            throw new RuntimeException(service + " not found " + FIELDPREFIX + "_sameGroupTransport");
+    static void checkAsyncModifier(Class param, Method method) {
+        if (param == CompletionHandler.class) return;
+        if (Modifier.isFinal(param.getModifiers())) {
+            throw new RuntimeException("CompletionHandler Type Parameter on {" + method + "} cannot final modifier");
+        }
+        if (!Modifier.isPublic(param.getModifiers())) {
+            throw new RuntimeException("CompletionHandler Type Parameter on {" + method + "} must be public modifier");
+        }
+        if (param.isInterface()) return;
+        boolean constructorflag = false;
+        for (Constructor c : param.getDeclaredConstructors()) {
+            if (c.getParameterCount() == 0) {
+                int mod = c.getModifiers();
+                if (Modifier.isPublic(mod) || Modifier.isProtected(mod)) {
+                    constructorflag = true;
+                    break;
+                }
+            }
+        }
+        if (param.getDeclaredConstructors().length == 0) constructorflag = true;
+        if (!constructorflag) throw new RuntimeException(param + " must have a empty parameter Constructor");
+        for (Method m : param.getMethods()) {
+            if (m.getName().equals("completed") && Modifier.isFinal(m.getModifiers())) {
+                throw new RuntimeException(param + "'s completed method cannot final modifier");
+            } else if (m.getName().equals("failed") && Modifier.isFinal(m.getModifiers())) {
+                throw new RuntimeException(param + "'s failed method cannot final modifier");
+            } else if (m.getName().equals("sncp_getParams") && Modifier.isFinal(m.getModifiers())) {
+                throw new RuntimeException(param + "'s sncp_getParams method cannot final modifier");
+            } else if (m.getName().equals("sncp_setParams") && Modifier.isFinal(m.getModifiers())) {
+                throw new RuntimeException(param + "'s sncp_setParams method cannot final modifier");
+            } else if (m.getName().equals("sncp_setFuture") && Modifier.isFinal(m.getModifiers())) {
+                throw new RuntimeException(param + "'s sncp_setFuture method cannot final modifier");
+            } else if (m.getName().equals("sncp_getFuture") && Modifier.isFinal(m.getModifiers())) {
+                throw new RuntimeException(param + "'s sncp_getFuture method cannot final modifier");
+            }
         }
     }
 
-    public static Transport[] getDiffGroupTransports(Service service) {
-        if (service == null) return null;
-        try {
-            Field ts = service.getClass().getDeclaredField(FIELDPREFIX + "_diffGroupTransports");
-            ts.setAccessible(true);
-            return (Transport[]) ts.get(service);
-        } catch (Exception e) {
-            throw new RuntimeException(service + " not found " + FIELDPREFIX + "_diffGroupTransports");
+    public static String toSimpleString(final Service service, int maxNameLength, int maxClassNameLength) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(isRemote(service) ? "RemoteService" : "LocalService ");
+        int len;
+        Class type = getResourceType(service);
+        String name = getResourceName(service);
+        sb.append("(type= ").append(type.getName());
+        len = maxClassNameLength - type.getName().length();
+        for (int i = 0; i < len; i++) {
+            sb.append(' ');
         }
+        sb.append(", name='").append(name).append("'");
+        for (int i = 0; i < maxNameLength - name.length(); i++) {
+            sb.append(' ');
+        }
+        sb.append(")");
+        return sb.toString();
     }
 
     /**
      * <blockquote><pre>
      * public class TestService implements Service{
-     * <p>
+     *
      *      public String findSomeThing(){
      *          return "hello";
      *      }
-     * <p>
-     *      &#64;MultiRun(selfrun = false)
+     *
+     *      &#64;RpcMultiRun(selfrun = false)
      *      public void createSomeThing(TestBean bean){
      *          //do something
      *      }
-     * <p>
-     *      &#64;MultiRun
+     *
+     *      &#64;RpcMultiRun
      *      public String updateSomeThing(String id){
      *          return "hello" + id;
      *      }
      * }
      * </pre></blockquote>
-     * <p>
+     *
      * <blockquote><pre>
      * &#64;Resource(name = "")
      * &#64;SncpDyn(remote = false)
-     * &#64;ResourceType({TestService.class})
+     * &#64;ResourceType(TestService.class)
      * public final class _DynLocalTestService extends TestService{
-     * <p>
-     *      &#64;Resource
-     *      private BsonConvert _redkale_convert;
-     * <p>
-     *      private Transport _redkale_sameGroupTransport;
-     * <p>
-     *      private Transport[] _redkale_diffGroupTransports;
-     * <p>
+     *
+     *      private AnyValue _redkale_conf;
+     *
      *      private SncpClient _redkale_client;
-     * <p>
-     *      private String _redkale_selfstring;
-     * <p>
+     *
      *      &#64;Override
      *      public String toString() {
      *          return _redkale_selfstring == null ? super.toString() : _redkale_selfstring;
      *      }
-     * <p>
+     *
      *      &#64;Override
      *      public void createSomeThing(TestBean bean){
      *          this._redkale_createSomeThing(false, true, true, bean);
      *      }
-     * <p>
+     *
      *      &#64;SncpDyn(remote = false, index = 0)
      *      public void _redkale_createSomeThing(boolean selfrunnable, boolean samerunnable, boolean diffrunnable, TestBean bean){
      *          if(selfrunnable) super.createSomeThing(bean);
      *          if (_redkale_client== null) return;
-     *          if (samerunnable) _redkale_client.remoteSameGroup(_redkale_convert, _sameGroupTransport, 0, true, false, false, bean);
-     *          if (diffrunnable) _redkale_client.remoteDiffGroup(_redkale_convert, _diffGroupTransports, 0, true, true, false, bean);
+     *          if (samerunnable) _redkale_client.remoteSameGroup(0, true, false, false, bean);
+     *          if (diffrunnable) _redkale_client.remoteDiffGroup(0, true, true, false, bean);
      *      }
-     * <p>
+     *
      *      &#64;Override
      *      public String updateSomeThing(String id){
      *          return this._redkale_updateSomeThing(true, true, true, id);
      *      }
-     * <p>
+     *
      *      &#64;SncpDyn(remote = false, index = 1)
      *      public String _redkale_updateSomeThing(boolean selfrunnable, boolean samerunnable, boolean diffrunnable, String id){
      *          String rs = super.updateSomeThing(id);
-     *          if (_redkale_client== null) return;
-     *          if (samerunnable) _redkale_client.remoteSameGroup(_redkale_convert, _sameGroupTransport, 1, true, false, false, id);
-     *          if (diffrunnable) _redkale_client.remoteDiffGroup(_redkale_convert, _diffGroupTransports, 1, true, true, false, id);
+     *          if (_redkale_client== null) return rs;
+     *          if (samerunnable) _redkale_client.remoteSameGroup(1, true, false, false, id);
+     *          if (diffrunnable) _redkale_client.remoteDiffGroup(1, true, true, false, id);
      *          return rs;
      *      }
      * }
      * </pre></blockquote>
-     * <p>
+     *
      * 创建Service的本地模式Class
      *
-     * @param <T>          Service子类
-     * @param name         资源名
-     * @param serviceClass Service类
+     * @param <T>              Service子类
+     * @param classLoader      ClassLoader
+     * @param name             资源名
+     * @param serviceImplClass Service类
+     *
      * @return Service实例
      */
     @SuppressWarnings("unchecked")
-    protected static <T extends Service> Class<? extends T> createLocalServiceClass(final String name, final Class<T> serviceClass) {
-        if (serviceClass == null) return null;
-        if (!Service.class.isAssignableFrom(serviceClass)) return serviceClass;
-        int mod = serviceClass.getModifiers();
-        if (!java.lang.reflect.Modifier.isPublic(mod)) return serviceClass;
-        if (java.lang.reflect.Modifier.isAbstract(mod)) return serviceClass;
-        final List<Method> methods = SncpClient.parseMethod(serviceClass);
-        final String supDynName = serviceClass.getName().replace('.', '/');
+    protected static <T extends Service> Class<? extends T> createLocalServiceClass(ClassLoader classLoader, final String name, final Class<T> serviceImplClass) {
+        if (serviceImplClass == null) return null;
+        if (!Service.class.isAssignableFrom(serviceImplClass)) return serviceImplClass;
+        ResourceFactory.checkResourceName(name);
+        int mod = serviceImplClass.getModifiers();
+        if (!java.lang.reflect.Modifier.isPublic(mod)) return serviceImplClass;
+        if (java.lang.reflect.Modifier.isAbstract(mod)) return serviceImplClass;
+        final List<Method> methods = SncpClient.parseMethod(serviceImplClass);
+        final String supDynName = serviceImplClass.getName().replace('.', '/');
         final String clientName = SncpClient.class.getName().replace('.', '/');
+        final String resDesc = Type.getDescriptor(Resource.class);
         final String clientDesc = Type.getDescriptor(SncpClient.class);
-        final String convertDesc = Type.getDescriptor(BsonConvert.class);
+        final String anyValueDesc = Type.getDescriptor(AnyValue.class);
         final String sncpDynDesc = Type.getDescriptor(SncpDyn.class);
-        final String transportDesc = Type.getDescriptor(Transport.class);
-        final String transportsDesc = Type.getDescriptor(Transport[].class);
-        ClassLoader loader = Sncp.class.getClassLoader();
-        String newDynName = supDynName.substring(0, supDynName.lastIndexOf('/') + 1) + LOCALPREFIX + serviceClass.getSimpleName();
+        ClassLoader loader = classLoader == null ? Thread.currentThread().getContextClassLoader() : classLoader;
+        String newDynName = supDynName.substring(0, supDynName.lastIndexOf('/') + 1) + LOCALPREFIX + serviceImplClass.getSimpleName();
         if (!name.isEmpty()) {
             boolean normal = true;
             for (char ch : name.toCharArray()) {
                 if (!((ch >= '0' && ch <= '9') || ch == '_' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z'))) normal = false;
             }
+            if (!normal) throw new RuntimeException(serviceImplClass + "'s resource name is illegal, must be 0-9 _ a-z A-Z");
             newDynName += "_" + (normal ? name : hash(name));
         }
         try {
-            return (Class<T>) Class.forName(newDynName.replace('/', '.'));
-        } catch (Exception ex) {
+            return (Class<T>) loader.loadClass(newDynName.replace('/', '.'));
+        } catch (Throwable ex) {
         }
         //------------------------------------------------------------------------------
         ClassWriter cw = new ClassWriter(COMPUTE_FRAMES);
         FieldVisitor fv;
-        AsmMethodVisitor mv;
+        MethodDebugVisitor mv;
         AnnotationVisitor av0;
 
         cw.visit(V1_8, ACC_PUBLIC + ACC_FINAL + ACC_SUPER, newDynName, null, supDynName, null);
         {
-            av0 = cw.visitAnnotation("Ljavax/annotation/Resource;", true);
+            av0 = cw.visitAnnotation(resDesc, true);
             av0.visit("name", name);
             av0.visitEnd();
         }
@@ -252,53 +316,27 @@ public abstract class Sncp {
             av0.visitEnd();
         }
         { //给新类加上 原有的Annotation
-            for (Annotation ann : serviceClass.getAnnotations()) {
+            for (Annotation ann : serviceImplClass.getAnnotations()) {
                 if (ann instanceof Resource || ann instanceof SncpDyn || ann instanceof ResourceType) continue;
                 visitAnnotation(cw.visitAnnotation(Type.getDescriptor(ann.annotationType()), true), ann);
             }
         }
         {
             av0 = cw.visitAnnotation(Type.getDescriptor(ResourceType.class), true);
-            {
-                AnnotationVisitor av1 = av0.visitArray("value");
-                ResourceType rty = serviceClass.getAnnotation(ResourceType.class);
-                if (rty == null) {
-                    av1.visit(null, Type.getType(Type.getDescriptor(serviceClass)));
-                } else {
-                    for (Class cl : rty.value()) {
-                        av1.visit(null, Type.getType(Type.getDescriptor(cl)));
-                    }
-                }
-                av1.visitEnd();
-            }
+            ResourceType rty = serviceImplClass.getAnnotation(ResourceType.class);
+            av0.visit("value", Type.getType(Type.getDescriptor(rty == null ? serviceImplClass : rty.value())));
             av0.visitEnd();
         }
-
         {
-            fv = cw.visitField(ACC_PRIVATE, FIELDPREFIX + "_convert", convertDesc, null, null);
-            av0 = fv.visitAnnotation("Ljavax/annotation/Resource;", true);
-            av0.visitEnd();
-            fv.visitEnd();
-        }
-        {
-            fv = cw.visitField(ACC_PRIVATE, FIELDPREFIX + "_sameGroupTransport", transportDesc, null, null);
-            fv.visitEnd();
-        }
-        {
-            fv = cw.visitField(ACC_PRIVATE, FIELDPREFIX + "_diffGroupTransports", transportsDesc, null, null);
+            fv = cw.visitField(ACC_PRIVATE, FIELDPREFIX + "_conf", anyValueDesc, null, null);
             fv.visitEnd();
         }
         {
             fv = cw.visitField(ACC_PRIVATE, FIELDPREFIX + "_client", clientDesc, null, null);
             fv.visitEnd();
         }
-
-        {
-            fv = cw.visitField(ACC_PRIVATE, FIELDPREFIX + "_selfstring", "Ljava/lang/String;", null, null);
-            fv.visitEnd();
-        }
         { //构造函数
-            mv = new AsmMethodVisitor(cw.visitMethod(ACC_PUBLIC, "<init>", "()V", null, null));
+            mv = new MethodDebugVisitor(cw.visitMethod(ACC_PUBLIC, "<init>", "()V", null, null));
             //mv.setDebug(true);
             mv.visitVarInsn(ALOAD, 0);
             mv.visitMethodInsn(INVOKESPECIAL, supDynName, "<init>", "()V", false);
@@ -307,18 +345,20 @@ public abstract class Sncp {
             mv.visitEnd();
         }
         { // toString()
-            mv = new AsmMethodVisitor(cw.visitMethod(ACC_PUBLIC, "toString", "()Ljava/lang/String;", null, null));
+            mv = new MethodDebugVisitor(cw.visitMethod(ACC_PUBLIC, "toString", "()Ljava/lang/String;", null, null));
             mv.visitVarInsn(ALOAD, 0);
-            mv.visitFieldInsn(GETFIELD, newDynName, FIELDPREFIX + "_selfstring", "Ljava/lang/String;");
+            mv.visitFieldInsn(GETFIELD, newDynName, FIELDPREFIX + "_client", clientDesc);
             Label l1 = new Label();
             mv.visitJumpInsn(IFNONNULL, l1);
             mv.visitVarInsn(ALOAD, 0);
-            mv.visitMethodInsn(INVOKESPECIAL, "java/lang/Object", "toString", "()Ljava/lang/String;", false);
+            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Object", "getClass", "()Ljava/lang/Class;", false);
+            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Class", "getName", "()Ljava/lang/String;", false);
             Label l2 = new Label();
             mv.visitJumpInsn(GOTO, l2);
             mv.visitLabel(l1);
             mv.visitVarInsn(ALOAD, 0);
-            mv.visitFieldInsn(GETFIELD, newDynName, FIELDPREFIX + "_selfstring", "Ljava/lang/String;");
+            mv.visitFieldInsn(GETFIELD, newDynName, FIELDPREFIX + "_client", clientDesc);
+            mv.visitMethodInsn(INVOKEVIRTUAL, clientName, "toSimpleString", "()Ljava/lang/String;", false);
             mv.visitLabel(l2);
             mv.visitInsn(ARETURN);
             mv.visitMaxs(1, 1);
@@ -326,20 +366,20 @@ public abstract class Sncp {
         }
         int i = - 1;
         for (final Method method : methods) {
-            final MultiRun mrun = method.getAnnotation(MultiRun.class);
+            final RpcMultiRun mrun = method.getAnnotation(RpcMultiRun.class);
             if (mrun == null) continue;
             final Class returnType = method.getReturnType();
             final String methodDesc = Type.getMethodDescriptor(method);
             final Class[] paramtypes = method.getParameterTypes();
             final int index = ++i;
             {   //原始方法
-                mv = new AsmMethodVisitor(cw.visitMethod(ACC_PUBLIC + (method.isVarArgs() ? ACC_VARARGS : 0), method.getName(), methodDesc, null, null));
+                mv = new MethodDebugVisitor(cw.visitMethod(ACC_PUBLIC + (method.isVarArgs() ? ACC_VARARGS : 0), method.getName(), methodDesc, null, null));
                 //mv.setDebug(true);
                 { //给参数加上 Annotation
                     final Annotation[][] anns = method.getParameterAnnotations();
                     for (int k = 0; k < anns.length; k++) {
                         for (Annotation ann : anns[k]) {
-                            if (ann instanceof SncpDyn || ann instanceof MultiRun) continue; //必须过滤掉 MultiRun、SncpDyn，否则生成远程模式Service时会出错
+                            if (ann instanceof SncpDyn || ann instanceof RpcMultiRun) continue; //必须过滤掉 RpcMultiRun、SncpDyn，否则生成远程模式Service时会出错
                             visitAnnotation(mv.visitParameterAnnotation(k, Type.getDescriptor(ann.annotationType()), true), ann);
                         }
                     }
@@ -349,7 +389,13 @@ public abstract class Sncp {
                 mv.visitInsn(mrun.samerun() ? ICONST_1 : ICONST_0);
                 mv.visitInsn(mrun.diffrun() ? ICONST_1 : ICONST_0);
                 int varindex = 0;
+                boolean handlerFuncFlag = false;
                 for (Class pt : paramtypes) {
+                    if (CompletionHandler.class.isAssignableFrom(pt)) {
+                        if (handlerFuncFlag) throw new RuntimeException(method + " have more than one CompletionHandler type parameter");
+                        checkAsyncModifier(pt, method);
+                        handlerFuncFlag = true;
+                    }
                     if (pt.isPrimitive()) {
                         if (pt == long.class) {
                             mv.visitVarInsn(LLOAD, ++varindex);
@@ -386,13 +432,20 @@ public abstract class Sncp {
                 mv.visitEnd();
             }
             {  // _方法   _方法比无_方法多了三个参数
-                mv = new AsmMethodVisitor(cw.visitMethod(ACC_PUBLIC + (method.isVarArgs() ? ACC_VARARGS : 0), FIELDPREFIX + "_" + method.getName(), "(ZZZ" + methodDesc.substring(1), null, null));
+                mv = new MethodDebugVisitor(cw.visitMethod(ACC_PUBLIC + (method.isVarArgs() ? ACC_VARARGS : 0), FIELDPREFIX + "_" + method.getName(), "(ZZZ" + methodDesc.substring(1), null, null));
                 //mv.setDebug(true);  
                 { //给参数加上 Annotation
                     final Annotation[][] anns = method.getParameterAnnotations();
+                    boolean handlerAttachFlag = false;
                     for (int k = 0; k < anns.length; k++) {
                         for (Annotation ann : anns[k]) {
-                            if (ann instanceof SncpDyn || ann instanceof MultiRun) continue; //必须过滤掉 MultiRun、SncpDyn，否则生成远程模式Service时会出错
+                            if (ann.annotationType() == RpcAttachment.class) {
+                                if (handlerAttachFlag) {
+                                    throw new RuntimeException(method + " have more than one @RpcAttachment parameter");
+                                }
+                                handlerAttachFlag = true;
+                            }
+                            if (ann instanceof SncpDyn || ann instanceof RpcMultiRun) continue; //必须过滤掉 RpcMultiRun、SncpDyn，否则生成远程模式Service时会出错
                             visitAnnotation(mv.visitParameterAnnotation(k, Type.getDescriptor(ann.annotationType()), true), ann);
                         }
                     }
@@ -434,12 +487,12 @@ public abstract class Sncp {
                 } else if (returnType.isPrimitive()) {
                     if (returnType == long.class) {
                         mv.visitVarInsn(LSTORE, ++varindex);
-                        ++varindex; //多加1
+                        //++varindex; //多加1
                     } else if (returnType == float.class) {
                         mv.visitVarInsn(FSTORE, ++varindex);
                     } else if (returnType == double.class) {
                         mv.visitVarInsn(DSTORE, ++varindex);
-                        ++varindex; //多加1
+                        //++varindex; //多加1
                     } else {
                         mv.visitVarInsn(ISTORE, ++varindex);
                     }
@@ -481,21 +534,10 @@ public abstract class Sncp {
 
                 mv.visitVarInsn(ALOAD, 0);//调用 _client
                 mv.visitFieldInsn(GETFIELD, newDynName, FIELDPREFIX + "_client", clientDesc);
-                mv.visitVarInsn(ALOAD, 0);  //传递 _convert
-                mv.visitFieldInsn(GETFIELD, newDynName, FIELDPREFIX + "_convert", convertDesc);
-                mv.visitVarInsn(ALOAD, 0);  //传递 _sameGroupTransport
-                mv.visitFieldInsn(GETFIELD, newDynName, FIELDPREFIX + "_sameGroupTransport", transportDesc);
+                final int preparams = 3; //调用selfrunnable之前的参数个数;  _client
 
-                if (index <= 5) {  //第几个 SncpAction 
-                    mv.visitInsn(ICONST_0 + index);
-                } else {
-                    mv.visitIntInsn(BIPUSH, index);
-                }
-                if (paramtypes.length + 3 <= 5) {  //参数总数量
-                    mv.visitInsn(ICONST_0 + paramtypes.length + 3);
-                } else {
-                    mv.visitIntInsn(BIPUSH, paramtypes.length + 3);
-                }
+                pushInt(mv, index);   //第几个 SncpAction 
+                pushInt(mv, paramtypes.length + preparams);   //参数总数量
 
                 mv.visitTypeInsn(ANEWARRAY, "java/lang/Object");
 
@@ -507,26 +549,22 @@ public abstract class Sncp {
 
                 mv.visitInsn(DUP);
                 mv.visitInsn(ICONST_1);
-                mv.visitInsn(ICONST_0);   //第一个参数  samerunnable
+                mv.visitInsn(ICONST_0);   //第二个参数  samerunnable
                 mv.visitMethodInsn(INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", false);
                 mv.visitInsn(AASTORE);
 
                 mv.visitInsn(DUP);
                 mv.visitInsn(ICONST_2);
-                mv.visitInsn(ICONST_0);   //第二个参数  diffrunnable
+                mv.visitInsn(ICONST_0);   //第三个参数  diffrunnable
                 mv.visitMethodInsn(INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", false);
                 mv.visitInsn(AASTORE);
 
-                int insn = 3;
+                int insn = 3; //空3给selfrunnable、samerunnable、diffrunnable
                 for (int j = 0; j < paramtypes.length; j++) {
                     final Class pt = paramtypes[j];
                     mv.visitInsn(DUP);
                     insn++;
-                    if (j <= 2) {
-                        mv.visitInsn(ICONST_0 + j + 3);
-                    } else {
-                        mv.visitIntInsn(BIPUSH, j + 3);
-                    }
+                    pushInt(mv, j + 3);
                     if (pt.isPrimitive()) {
                         if (pt == long.class) {
                             mv.visitVarInsn(LLOAD, insn++);
@@ -544,7 +582,7 @@ public abstract class Sncp {
                     }
                     mv.visitInsn(AASTORE);
                 }
-                mv.visitMethodInsn(INVOKEVIRTUAL, clientName, mrun.async() ? "asyncRemoteSameGroup" : "remoteSameGroup", "(" + convertDesc + transportDesc + "I[Ljava/lang/Object;)V", false);
+                mv.visitMethodInsn(INVOKEVIRTUAL, clientName, mrun.async() ? "asyncRemoteSameGroup" : "remoteSameGroup", "(I[Ljava/lang/Object;)V", false);
                 mv.visitLabel(sameLabel);
                 //---------------------------- 调用diffrun ---------------------------------
                 mv.visitVarInsn(ILOAD, 3); //读取 diffrunnable
@@ -553,21 +591,9 @@ public abstract class Sncp {
 
                 mv.visitVarInsn(ALOAD, 0);
                 mv.visitFieldInsn(GETFIELD, newDynName, FIELDPREFIX + "_client", clientDesc);
-                mv.visitVarInsn(ALOAD, 0);
-                mv.visitFieldInsn(GETFIELD, newDynName, FIELDPREFIX + "_convert", convertDesc);
-                mv.visitVarInsn(ALOAD, 0);
-                mv.visitFieldInsn(GETFIELD, newDynName, FIELDPREFIX + "_diffGroupTransports", transportsDesc);
 
-                if (index <= 5) {  //第几个 SncpAction 
-                    mv.visitInsn(ICONST_0 + index);
-                } else {
-                    mv.visitIntInsn(BIPUSH, index);
-                }
-                if (paramtypes.length + 3 <= 5) {  //参数总数量
-                    mv.visitInsn(ICONST_0 + paramtypes.length + 3);
-                } else {
-                    mv.visitIntInsn(BIPUSH, paramtypes.length + 3);
-                }
+                pushInt(mv, index); //第几个 SncpAction 
+                pushInt(mv, paramtypes.length + preparams); //参数总数量
 
                 mv.visitTypeInsn(ANEWARRAY, "java/lang/Object");
 
@@ -589,16 +615,12 @@ public abstract class Sncp {
                 mv.visitMethodInsn(INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", false);
                 mv.visitInsn(AASTORE);
 
-                insn = 3;
+                insn = 3;//空3给selfrunnable、samerunnable、diffrunnable
                 for (int j = 0; j < paramtypes.length; j++) {
                     final Class pt = paramtypes[j];
                     mv.visitInsn(DUP);
                     insn++;
-                    if (j <= 2) {
-                        mv.visitInsn(ICONST_0 + j + 3);
-                    } else {
-                        mv.visitIntInsn(BIPUSH, j + 3);
-                    }
+                    pushInt(mv, j + 3);
                     if (pt.isPrimitive()) {
                         if (pt == long.class) {
                             mv.visitVarInsn(LLOAD, insn++);
@@ -616,7 +638,7 @@ public abstract class Sncp {
                     }
                     mv.visitInsn(AASTORE);
                 }
-                mv.visitMethodInsn(INVOKEVIRTUAL, clientName, mrun.async() ? "asyncRemoteDiffGroup" : "remoteDiffGroup", "(" + convertDesc + transportsDesc + "I[Ljava/lang/Object;)V", false);
+                mv.visitMethodInsn(INVOKEVIRTUAL, clientName, mrun.async() ? "asyncRemoteDiffGroup" : "remoteDiffGroup", "(I[Ljava/lang/Object;)V", false);
                 mv.visitLabel(diffLabel);
 
                 if (returnType == void.class) {
@@ -700,57 +722,53 @@ public abstract class Sncp {
         }
     }
 
+    public static <T extends Service> T createSimpleLocalService(final Class<T> serviceImplClass,
+        final TransportFactory transportFactory, final InetSocketAddress clientSncpAddress, final String... groups) {
+        return createLocalService(null, "", serviceImplClass, ResourceFactory.root(), transportFactory, clientSncpAddress, Utility.ofSet(groups), null);
+    }
+
     /**
      *
      * 创建本地模式Service实例
      *
-     * @param <T>                 Service泛型
-     * @param name                资源名
-     * @param executor            线程池
-     * @param resourceFactory     资源容器
-     * @param serviceClass        Service类
-     * @param clientAddress       本地IP地址
-     * @param sameGroupTransport  同组的通信组件
-     * @param diffGroupTransports 异组的通信组件列表
+     * @param <T>               Service泛型
+     * @param classLoader       ClassLoader
+     * @param name              资源名
+     * @param serviceImplClass  Service类
+     * @param resourceFactory   ResourceFactory
+     * @param transportFactory  TransportFactory
+     * @param clientSncpAddress 本地IP地址
+     * @param groups            所有的组节点，包含自身
+     * @param conf              启动配置项
+     *
      * @return Service的本地模式实例
      */
     @SuppressWarnings("unchecked")
-    public static <T extends Service> T createLocalService(final String name, final Consumer<Runnable> executor, final ResourceFactory resourceFactory,
-                                                           final Class<T> serviceClass, final InetSocketAddress clientAddress, final Transport sameGroupTransport, final Collection<Transport> diffGroupTransports) {
+    public static <T extends Service> T createLocalService(
+        final ClassLoader classLoader,
+        final String name,
+        final Class<T> serviceImplClass,
+        final ResourceFactory resourceFactory,
+        final TransportFactory transportFactory,
+        final InetSocketAddress clientSncpAddress,
+        final Set<String> groups,
+        final AnyValue conf) {
         try {
-            final Class newClazz = createLocalServiceClass(name, serviceClass);
-            T rs = (T) newClazz.newInstance();
+            final Class newClazz = createLocalServiceClass(classLoader, name, serviceImplClass);
+            T rs = (T) newClazz.getDeclaredConstructor().newInstance();
             //--------------------------------------            
             Service remoteService = null;
-            Transport remoteTransport = null;
             {
                 Class loop = newClazz;
                 do {
                     for (Field field : loop.getDeclaredFields()) {
                         int mod = field.getModifiers();
                         if (Modifier.isFinal(mod) || Modifier.isStatic(mod)) continue;
-                        if (field.getAnnotation(DynRemote.class) == null) continue;
+                        if (field.getAnnotation(RpcRemote.class) == null) continue;
                         if (!field.getType().isAssignableFrom(newClazz)) continue;
                         field.setAccessible(true);
-                        if (remoteTransport == null) {
-                            List<Transport> list = new ArrayList<>();
-                            if (sameGroupTransport != null) list.add(sameGroupTransport);
-                            if (diffGroupTransports != null) list.addAll(diffGroupTransports);
-                            if (!list.isEmpty()) {
-                                Transport tmp = new Transport(list);
-                                synchronized (resourceFactory) {
-                                    Transport old = resourceFactory.find(tmp.getName(), Transport.class);
-                                    if (old != null) {
-                                        remoteTransport = old;
-                                    } else {
-                                        remoteTransport = tmp;
-                                        resourceFactory.register(tmp.getName(), tmp);
-                                    }
-                                }
-                            }
-                        }
-                        if (remoteService == null && remoteTransport != null) {
-                            remoteService = createRemoteService(name, executor, serviceClass, clientAddress, remoteTransport);
+                        if (remoteService == null && clientSncpAddress != null) {
+                            remoteService = createRemoteService(classLoader, name, serviceImplClass, transportFactory, clientSncpAddress, groups, conf);
                         }
                         if (remoteService != null) field.set(rs, remoteService);
                     }
@@ -761,52 +779,25 @@ public abstract class Sncp {
                 try {
                     Field e = newClazz.getDeclaredField(FIELDPREFIX + "_client");
                     e.setAccessible(true);
-                    client = new SncpClient(name, serviceClass, executor, false, newClazz, clientAddress);
+                    client = new SncpClient(name, serviceImplClass, rs, transportFactory, false, newClazz, clientSncpAddress);
+                    Set<String> diffGroups = groups == null ? new HashSet<>() : new HashSet<>(groups);
+                    String sameGroup = transportFactory.findGroupName(clientSncpAddress);
+                    if (sameGroup != null) diffGroups.remove(sameGroup);
+                    client.setSameGroup(sameGroup);
+                    client.setDiffGroups(diffGroups);
+                    client.setSameGroupTransport(transportFactory.loadSameGroupTransport(clientSncpAddress));
+                    client.setDiffGroupTransports(transportFactory.loadDiffGroupTransports(clientSncpAddress, diffGroups));
                     e.set(rs, client);
+                    transportFactory.addSncpService(rs);
                 } catch (NoSuchFieldException ne) {
+                    ne.printStackTrace();
                 }
-            }
-            {
-                StringBuilder sb = new StringBuilder();
-                sb.append(newClazz.getName()).append("{name = '").append(name).append("'");
-                if (client != null) {
-                    sb.append(", serviceid = ").append(client.getServiceid());
-                    sb.append(", action.size = ").append(client.getActionCount());
-                    List<String> groups = new ArrayList<>();
-                    if (sameGroupTransport != null) groups.add(sameGroupTransport.getName());
-                    if (diffGroupTransports != null) {
-                        for (Transport t : diffGroupTransports) {
-                            groups.add(t.getName());
-                        }
-                    }
-                    sb.append(", address = ").append(clientAddress).append(", groups = ").append(groups);
-                    sb.append(", sameaddrs = ").append(sameGroupTransport == null ? null : Arrays.asList(sameGroupTransport.getRemoteAddresses()));
-
-                    List<InetSocketAddress> addrs = new ArrayList<>();
-                    if (diffGroupTransports != null) {
-                        for (Transport t : diffGroupTransports) {
-                            addrs.addAll(Arrays.asList(t.getRemoteAddresses()));
-                        }
-                    }
-                    sb.append(", diffaddrs = ").append(addrs);
-                } else {
-                    sb.append(", ").append(MultiRun.class.getSimpleName().toLowerCase()).append(" = false");
-                }
-                sb.append("}");
-                Field s = newClazz.getDeclaredField(FIELDPREFIX + "_selfstring");
-                s.setAccessible(true);
-                s.set(rs, sb.toString());
             }
             if (client == null) return rs;
             {
-                Field c = newClazz.getDeclaredField(FIELDPREFIX + "_sameGroupTransport");
+                Field c = newClazz.getDeclaredField(FIELDPREFIX + "_conf");
                 c.setAccessible(true);
-                c.set(rs, sameGroupTransport);
-            }
-            if (diffGroupTransports != null) {
-                Field t = newClazz.getDeclaredField(FIELDPREFIX + "_diffGroupTransports");
-                t.setAccessible(true);
-                t.set(rs, diffGroupTransports.toArray(new Transport[diffGroupTransports.size()]));
+                c.set(rs, conf);
             }
             return rs;
         } catch (RuntimeException rex) {
@@ -814,136 +805,118 @@ public abstract class Sncp {
         } catch (Exception ex) {
             throw new RuntimeException(ex);
         }
+    }
 
+    public static <T extends Service> T createSimpleRemoteService(final Class<T> serviceImplClass,
+        final TransportFactory transportFactory, final InetSocketAddress clientSncpAddress, final String... groups) {
+        return createRemoteService(null, "", serviceImplClass, transportFactory, clientSncpAddress, Utility.ofSet(groups), null);
     }
 
     /**
      * <blockquote><pre>
      * &#64;Resource(name = "")
      * &#64;SncpDyn(remote = true)
-     * &#64;ResourceType({TestService.class})
+     * &#64;ResourceType(TestService.class)
      * public final class _DynRemoteTestService extends TestService{
-     * <p>
-     *      &#64;Resource
-     *      private BsonConvert _redkale_convert;
-     * <p>
-     *      private Transport _redkale_transport;
-     * <p>
+     *
+     *      private AnyValue _redkale_conf;
+     *
      *      private SncpClient _redkale_client;
-     * <p>
-     *      private String _redkale_selfstring;
-     * <p>
-     *      &#64;Override
-     *      public String toString() {
-     *          return _redkale_selfstring == null ? super.toString() : _redkale_selfstring;
-     *      }
-     * <p>
+     *
      *      &#64;SncpDyn(remote = false, index = 0)
      *      public void _redkale_createSomeThing(boolean selfrunnable, boolean samerunnable, boolean diffrunnable, TestBean bean){
-     *          _redkale_client.remote(_redkale_convert, _redkale_transport, 0, selfrunnable, samerunnable, diffrunnable, bean);
+     *          _redkale_client.remote(0, selfrunnable, samerunnable, diffrunnable, bean);
      *      }
-     * <p>
+     *
      *      &#64;SncpDyn(remote = false, index = 1)
      *      public String _redkale_updateSomeThing(boolean selfrunnable, boolean samerunnable, boolean diffrunnable, String id){
-     *          return _redkale_client.remote(_redkale_convert, _redkale_transport, 1, selfrunnable, samerunnable, diffrunnable, id);
+     *          return _redkale_client.remote(1, selfrunnable, samerunnable, diffrunnable, id);
      *      }
-     * <p>
+     *
      *      &#64;Override
      *      public void createSomeThing(TestBean bean){
-     *          _redkale_client.remote(_redkale_convert, _redkale_transport, 2, bean);
+     *          _redkale_client.remote(2, bean);
      *      }
-     * <p>
+     *
      *      &#64;Override
      *      public String findSomeThing(){
-     *          return _redkale_client.remote(_redkale_convert, _redkale_transport, 3);
+     *          return _redkale_client.remote(3);
      *      }
-     * <p>
+     *
      *      &#64;Override
      *      public String updateSomeThing(String id){
-     *          return  _redkale_client.remote(_redkale_convert, _redkale_transport, 4, id);
+     *          return  _redkale_client.remote(4, id);
      *      }
      * }
      * </pre></blockquote>
-     * <p>
+     *
      * 创建远程模式的Service实例
      *
-     * @param <T>           Service泛型
-     * @param name          资源名
-     * @param executor      线程池
-     * @param serviceClass  Service类
-     * @param clientAddress 本地IP地址
-     * @param transport     通信组件
+     * @param <T>                    Service泛型
+     * @param classLoader            ClassLoader
+     * @param name                   资源名
+     * @param serviceTypeOrImplClass Service类
+     * @param transportFactory       TransportFactory
+     * @param clientAddress          本地IP地址
+     * @param groups0                 所有的组节点，包含自身
+     * @param conf                   启动配置项
      *
      * @return Service的远程模式实例
      */
     @SuppressWarnings("unchecked")
-    public static <T extends Service> T createRemoteService(final String name, final Consumer<Runnable> executor, final Class<T> serviceClass,
-                                                            final InetSocketAddress clientAddress, final Transport transport) {
-        if (serviceClass == null) return null;
-        if (!Service.class.isAssignableFrom(serviceClass)) return null;
-        int mod = serviceClass.getModifiers();
-        boolean realed = !(java.lang.reflect.Modifier.isAbstract(mod) || serviceClass.isInterface());
+
+    public static <T extends Service> T createRemoteService(
+        final ClassLoader classLoader,
+        final String name,
+        final Class<T> serviceTypeOrImplClass,
+        final TransportFactory transportFactory,
+        final InetSocketAddress clientAddress,
+        final Set<String> groups0,
+        final AnyValue conf) {
+        if (serviceTypeOrImplClass == null) return null;
+        if (!Service.class.isAssignableFrom(serviceTypeOrImplClass)) return null;
+        Set<String> groups = groups0 == null ? new HashSet<>() : groups0;
+        ResourceFactory.checkResourceName(name);
+        int mod = serviceTypeOrImplClass.getModifiers();
+        boolean realed = !(java.lang.reflect.Modifier.isAbstract(mod) || serviceTypeOrImplClass.isInterface());
         if (!java.lang.reflect.Modifier.isPublic(mod)) return null;
-        final String supDynName = serviceClass.getName().replace('.', '/');
+        final String supDynName = serviceTypeOrImplClass.getName().replace('.', '/');
         final String clientName = SncpClient.class.getName().replace('.', '/');
+        final String resDesc = Type.getDescriptor(Resource.class);
         final String clientDesc = Type.getDescriptor(SncpClient.class);
         final String sncpDynDesc = Type.getDescriptor(SncpDyn.class);
-        final String convertDesc = Type.getDescriptor(BsonConvert.class);
-        final String transportDesc = Type.getDescriptor(Transport.class);
         final String anyValueDesc = Type.getDescriptor(AnyValue.class);
-        ClassLoader loader = Sncp.class.getClassLoader();
-        String newDynName = supDynName.substring(0, supDynName.lastIndexOf('/') + 1) + REMOTEPREFIX + serviceClass.getSimpleName();
-        final SncpClient client = new SncpClient(name, serviceClass, executor, true, realed ? createLocalServiceClass(name, serviceClass) : serviceClass, clientAddress);
+        ClassLoader loader = classLoader == null ? Thread.currentThread().getContextClassLoader() : classLoader;
+        String newDynName = supDynName.substring(0, supDynName.lastIndexOf('/') + 1) + REMOTEPREFIX + serviceTypeOrImplClass.getSimpleName();
         try {
-            Class newClazz = Class.forName(newDynName.replace('/', '.'));
-            T rs = (T) newClazz.newInstance();
+            Class newClazz = loader.loadClass(newDynName.replace('/', '.'));
+            T rs = (T) newClazz.getDeclaredConstructor().newInstance();
+            SncpClient client = new SncpClient(name, serviceTypeOrImplClass, rs, transportFactory, true, realed ? createLocalServiceClass(loader, name, serviceTypeOrImplClass) : serviceTypeOrImplClass, clientAddress);
+            client.setRemoteGroups(groups);
+            client.setRemoteGroupTransport(transportFactory.loadRemoteTransport(clientAddress, groups));
             Field c = newClazz.getDeclaredField(FIELDPREFIX + "_client");
             c.setAccessible(true);
             c.set(rs, client);
-            Field t = newClazz.getDeclaredField(FIELDPREFIX + "_transport");
-            t.setAccessible(true);
-            t.set(rs, transport);
-            {
-                StringBuilder sb = new StringBuilder();
-                sb.append(newClazz.getName()).append("{name = '").append(name);
-                sb.append("', serviceid = ").append(client.getServiceid());
-                sb.append(", action.size = ").append(client.getActionCount());
-                sb.append(", address = ").append(clientAddress).append(", groups = ").append(transport == null ? null : transport.getName());
-                sb.append(", remoteaddrs = ").append(transport == null ? null : Arrays.asList(transport.getRemoteAddresses()));
-                sb.append("}");
-                Field s = newClazz.getDeclaredField(FIELDPREFIX + "_selfstring");
-                s.setAccessible(true);
-                s.set(rs, sb.toString());
-            }
+            transportFactory.addSncpService(rs);
             return rs;
-        } catch (Exception ex) {
+        } catch (Throwable ex) {
         }
         //------------------------------------------------------------------------------
         ClassWriter cw = new ClassWriter(COMPUTE_FRAMES);
         FieldVisitor fv;
-        AsmMethodVisitor mv;
+        MethodDebugVisitor mv;
         AnnotationVisitor av0;
 
-        cw.visit(V1_8, ACC_PUBLIC + ACC_FINAL + ACC_SUPER, newDynName, null, serviceClass.isInterface() ? "java/lang/Object" : supDynName, serviceClass.isInterface() ? new String[]{supDynName} : null);
+        cw.visit(V1_8, ACC_PUBLIC + ACC_FINAL + ACC_SUPER, newDynName, null, serviceTypeOrImplClass.isInterface() ? "java/lang/Object" : supDynName, serviceTypeOrImplClass.isInterface() ? new String[]{supDynName} : null);
         {
-            av0 = cw.visitAnnotation("Ljavax/annotation/Resource;", true);
+            av0 = cw.visitAnnotation(resDesc, true);
             av0.visit("name", name);
             av0.visitEnd();
         }
         {
             av0 = cw.visitAnnotation(Type.getDescriptor(ResourceType.class), true);
-            {
-                AnnotationVisitor av1 = av0.visitArray("value");
-                ResourceType rty = serviceClass.getAnnotation(ResourceType.class);
-                if (rty == null) {
-                    av1.visit(null, Type.getType(Type.getDescriptor(serviceClass)));
-                } else {
-                    for (Class cl : rty.value()) {
-                        av1.visit(null, Type.getType(Type.getDescriptor(cl)));
-                    }
-                }
-                av1.visitEnd();
-            }
+            ResourceType rty = serviceTypeOrImplClass.getAnnotation(ResourceType.class);
+            av0.visit("value", Type.getType(Type.getDescriptor(rty == null ? serviceTypeOrImplClass : rty.value())));
             av0.visitEnd();
         }
         {
@@ -952,74 +925,66 @@ public abstract class Sncp {
             av0.visitEnd();
         }
         { //给新类加上 原有的Annotation
-            for (Annotation ann : serviceClass.getAnnotations()) {
+            for (Annotation ann : serviceTypeOrImplClass.getAnnotations()) {
                 if (ann instanceof Resource || ann instanceof SncpDyn || ann instanceof ResourceType) continue;
                 visitAnnotation(cw.visitAnnotation(Type.getDescriptor(ann.annotationType()), true), ann);
             }
         }
         {
-            fv = cw.visitField(ACC_PRIVATE, FIELDPREFIX + "_convert", convertDesc, null, null);
-            av0 = fv.visitAnnotation("Ljavax/annotation/Resource;", true);
-            av0.visitEnd();
-            fv.visitEnd();
-        }
-        {
-            fv = cw.visitField(ACC_PRIVATE, FIELDPREFIX + "_transport", transportDesc, null, null);
+            fv = cw.visitField(ACC_PRIVATE, FIELDPREFIX + "_conf", anyValueDesc, null, null);
             fv.visitEnd();
         }
         {
             fv = cw.visitField(ACC_PRIVATE, FIELDPREFIX + "_client", clientDesc, null, null);
             fv.visitEnd();
         }
-        {
-            fv = cw.visitField(ACC_PRIVATE, FIELDPREFIX + "_selfstring", "Ljava/lang/String;", null, null);
-            fv.visitEnd();
-        }
         { //构造函数
-            mv = new AsmMethodVisitor(cw.visitMethod(ACC_PUBLIC, "<init>", "()V", null, null));
+            mv = new MethodDebugVisitor(cw.visitMethod(ACC_PUBLIC, "<init>", "()V", null, null));
             //mv.setDebug(true);
             mv.visitVarInsn(ALOAD, 0);
-            mv.visitMethodInsn(INVOKESPECIAL, serviceClass.isInterface() ? "java/lang/Object" : supDynName, "<init>", "()V", false);
+            mv.visitMethodInsn(INVOKESPECIAL, serviceTypeOrImplClass.isInterface() ? "java/lang/Object" : supDynName, "<init>", "()V", false);
             mv.visitInsn(RETURN);
             mv.visitMaxs(1, 1);
             mv.visitEnd();
         }
         { //init
-            mv = new AsmMethodVisitor(cw.visitMethod(ACC_PUBLIC, "init", "(" + anyValueDesc + ")V", null, null));
+            mv = new MethodDebugVisitor(cw.visitMethod(ACC_PUBLIC, "init", "(" + anyValueDesc + ")V", null, null));
             mv.visitInsn(RETURN);
             mv.visitMaxs(0, 2);
             mv.visitEnd();
         }
         { //destroy
-            mv = new AsmMethodVisitor(cw.visitMethod(ACC_PUBLIC, "destroy", "(" + anyValueDesc + ")V", null, null));
+            mv = new MethodDebugVisitor(cw.visitMethod(ACC_PUBLIC, "destroy", "(" + anyValueDesc + ")V", null, null));
             mv.visitInsn(RETURN);
             mv.visitMaxs(0, 2);
             mv.visitEnd();
         }
         { // toString()
-            mv = new AsmMethodVisitor(cw.visitMethod(ACC_PUBLIC, "toString", "()Ljava/lang/String;", null, null));
+            mv = new MethodDebugVisitor(cw.visitMethod(ACC_PUBLIC, "toString", "()Ljava/lang/String;", null, null));
             mv.visitVarInsn(ALOAD, 0);
-            mv.visitFieldInsn(GETFIELD, newDynName, FIELDPREFIX + "_selfstring", "Ljava/lang/String;");
+            mv.visitFieldInsn(GETFIELD, newDynName, FIELDPREFIX + "_client", clientDesc);
             Label l1 = new Label();
             mv.visitJumpInsn(IFNONNULL, l1);
             mv.visitVarInsn(ALOAD, 0);
-            mv.visitMethodInsn(INVOKESPECIAL, "java/lang/Object", "toString", "()Ljava/lang/String;", false);
+            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Object", "getClass", "()Ljava/lang/Class;", false);
+            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Class", "getName", "()Ljava/lang/String;", false);
             Label l2 = new Label();
             mv.visitJumpInsn(GOTO, l2);
             mv.visitLabel(l1);
             mv.visitVarInsn(ALOAD, 0);
-            mv.visitFieldInsn(GETFIELD, newDynName, FIELDPREFIX + "_selfstring", "Ljava/lang/String;");
+            mv.visitFieldInsn(GETFIELD, newDynName, FIELDPREFIX + "_client", clientDesc);
+            mv.visitMethodInsn(INVOKEVIRTUAL, clientName, "toSimpleString", "()Ljava/lang/String;", false);
             mv.visitLabel(l2);
             mv.visitInsn(ARETURN);
             mv.visitMaxs(1, 1);
             mv.visitEnd();
         }
         int i = -1;
-        for (final SncpAction entry : client.actions) {
+        for (final SncpAction entry : SncpClient.getSncpActions(realed ? createLocalServiceClass(loader, name, serviceTypeOrImplClass) : serviceTypeOrImplClass)) {
             final int index = ++i;
             final java.lang.reflect.Method method = entry.method;
             {
-                mv = new AsmMethodVisitor(cw.visitMethod(ACC_PUBLIC, method.getName(), Type.getMethodDescriptor(method), null, null));
+                mv = new MethodDebugVisitor(cw.visitMethod(ACC_PUBLIC, method.getName(), Type.getMethodDescriptor(method), null, null));
                 //mv.setDebug(true);
                 { //给参数加上 Annotation
                     final Annotation[][] anns = method.getParameterAnnotations();
@@ -1031,23 +996,12 @@ public abstract class Sncp {
                 }
                 mv.visitVarInsn(ALOAD, 0);
                 mv.visitFieldInsn(GETFIELD, newDynName, FIELDPREFIX + "_client", clientDesc);
-                mv.visitVarInsn(ALOAD, 0);
-                mv.visitFieldInsn(GETFIELD, newDynName, FIELDPREFIX + "_convert", convertDesc);
-                mv.visitVarInsn(ALOAD, 0);
-                mv.visitFieldInsn(GETFIELD, newDynName, FIELDPREFIX + "_transport", transportDesc);
-                if (index <= 5) {
-                    mv.visitInsn(ICONST_0 + index);
-                } else {
-                    mv.visitIntInsn(BIPUSH, index);
-                }
+
+                pushInt(mv, index);
 
                 {  //传参数
                     int paramlen = entry.paramTypes.length;
-                    if (paramlen <= 5) {
-                        mv.visitInsn(ICONST_0 + paramlen);
-                    } else {
-                        mv.visitIntInsn(BIPUSH, paramlen);
-                    }
+                    pushInt(mv, paramlen);
                     mv.visitTypeInsn(ANEWARRAY, "java/lang/Object");
                     java.lang.reflect.Type[] paramtypes = entry.paramTypes;
                     int insn = 0;
@@ -1055,11 +1009,7 @@ public abstract class Sncp {
                         final java.lang.reflect.Type pt = paramtypes[j];
                         mv.visitInsn(DUP);
                         insn++;
-                        if (j <= 5) {
-                            mv.visitInsn(ICONST_0 + j);
-                        } else {
-                            mv.visitIntInsn(BIPUSH, j);
-                        }
+                        pushInt(mv, j);
                         if (pt instanceof Class && ((Class) pt).isPrimitive()) {
                             if (pt == long.class) {
                                 mv.visitVarInsn(LLOAD, insn++);
@@ -1079,7 +1029,7 @@ public abstract class Sncp {
                     }
                 }
 
-                mv.visitMethodInsn(INVOKEVIRTUAL, clientName, "remote", "(" + convertDesc + transportDesc + "I[Ljava/lang/Object;)Ljava/lang/Object;", false);
+                mv.visitMethodInsn(INVOKEVIRTUAL, clientName, "remote", "(I[Ljava/lang/Object;)Ljava/lang/Object;", false);
                 //mv.visitMethodInsn(INVOKEVIRTUAL, convertName, "convertFrom", convertFromDesc, false);
                 if (method.getGenericReturnType() == void.class) {
                     mv.visitInsn(POP);
@@ -1121,29 +1071,49 @@ public abstract class Sncp {
             }
         }.loadClass(newDynName.replace('/', '.'), bytes);
         try {
-            T rs = (T) newClazz.newInstance();
-            Field c = newClazz.getDeclaredField(FIELDPREFIX + "_client");
-            c.setAccessible(true);
-            c.set(rs, client);
-            Field t = newClazz.getDeclaredField(FIELDPREFIX + "_transport");
-            t.setAccessible(true);
-            t.set(rs, transport);
+            T rs = (T) newClazz.getDeclaredConstructor().newInstance();
+            SncpClient client = new SncpClient(name, serviceTypeOrImplClass, rs, transportFactory, true, realed ? createLocalServiceClass(loader, name, serviceTypeOrImplClass) : serviceTypeOrImplClass, clientAddress);
+            client.setRemoteGroups(groups);
+            client.setRemoteGroupTransport(transportFactory.loadRemoteTransport(clientAddress, groups));
             {
-                StringBuilder sb = new StringBuilder();
-                sb.append(newClazz.getName()).append("{name = '").append(name);
-                sb.append("', serviceid = ").append(client.getServiceid());
-                sb.append(", action.size = ").append(client.getActionCount());
-                sb.append(", address = ").append(clientAddress).append(", groups = ").append(transport == null ? null : transport.getName());
-                sb.append(", remotes = ").append(transport == null ? null : Arrays.asList(transport.getRemoteAddresses()));
-                sb.append("}");
-                Field s = newClazz.getDeclaredField(FIELDPREFIX + "_selfstring");
-                s.setAccessible(true);
-                s.set(rs, sb.toString());
+                Field c = newClazz.getDeclaredField(FIELDPREFIX + "_client");
+                c.setAccessible(true);
+                c.set(rs, client);
             }
+            {
+                Field c = newClazz.getDeclaredField(FIELDPREFIX + "_conf");
+                c.setAccessible(true);
+                c.set(rs, conf);
+            }
+            transportFactory.addSncpService(rs);
             return rs;
         } catch (Exception ex) {
             throw new RuntimeException(ex);
         }
 
+    }
+
+    private static void pushInt(MethodDebugVisitor mv, int num) {
+        if (num < 6) {
+            mv.visitInsn(ICONST_0 + num);
+        } else if (num <= Byte.MAX_VALUE) {
+            mv.visitIntInsn(BIPUSH, num);
+        } else if (num <= Short.MAX_VALUE) {
+            mv.visitIntInsn(SIPUSH, num);
+        } else {
+            mv.visitLdcInsn(num);
+        }
+    }
+
+    private static void pushInt(MethodVisitor mv, int num) {
+        if (num < 6) {
+            mv.visitInsn(ICONST_0 + num);
+        } else if (num <= Byte.MAX_VALUE) {
+            mv.visitIntInsn(BIPUSH, num);
+        } else if (num <= Short.MAX_VALUE) {
+            mv.visitIntInsn(SIPUSH, num);
+        } else {
+            mv.visitLdcInsn(num);
+        }
     }
 }

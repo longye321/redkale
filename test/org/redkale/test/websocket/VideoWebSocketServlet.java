@@ -14,7 +14,7 @@ import org.redkale.util.TypeToken;
 import org.redkale.util.AnyValue;
 import java.io.*;
 import java.util.*;
-import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.*;
 
 /**
  *
@@ -52,7 +52,7 @@ public class VideoWebSocketServlet extends WebSocketServlet {
             private boolean repeat = false;
 
             @Override
-            public String onOpen(final HttpRequest request) {
+            public CompletableFuture<String> onOpen(final HttpRequest request) {
                 String uri = request.getRequestURI();
                 int pos = uri.indexOf("/listen/");
                 uri = uri.substring(pos + "/listen/".length());
@@ -61,7 +61,7 @@ public class VideoWebSocketServlet extends WebSocketServlet {
                 String sessionid = Long.toString(System.nanoTime());
                 if (uri.indexOf('\'') >= 0 || uri.indexOf('"') >= 0) return null;
                 if (!repeat) sessionid = uri;
-                return sessionid;
+                return CompletableFuture.completedFuture(sessionid);
             }
 
             @Override
@@ -80,32 +80,26 @@ public class VideoWebSocketServlet extends WebSocketServlet {
                     }
                     super.send(("{'type':'user_list','users':[" + sb + "]}").replace('\'', '"'));
                     String msg = ("{'type':'discover_user','user':{'userid':'" + this.getSessionid() + "','username':'" + users.get(this.getSessionid()) + "'}}").replace('\'', '"');
-                    super.getWebSocketGroup().getWebSockets().filter(x -> x != this).forEach(x -> {
-                        x.send(msg);
-                    });
+                    super.broadcastMessage(msg);
                 }
             }
 
             @Override
-            public void onMessage(String text) {
+            public void onMessage(Object text, boolean last) {
                 //System.out.println("接收到消息: " + text);
-                super.getWebSocketGroup().getWebSockets().filter(x -> x != this).forEach(x -> {
-                    x.send(text);
-                });
+                super.broadcastMessage(text, last);
             }
 
             @Override
             public void onClose(int code, String reason) {
                 sessions.remove(this.getSessionid());
                 String msg = ("{'type':'remove_user','user':{'userid':'" + this.getSessionid() + "','username':'" + users.get(this.getSessionid()) + "'}}").replace('\'', '"');
-                super.getWebSocketGroup().getWebSockets().filter(x -> x != this).forEach(x -> {
-                    x.send(msg);
-                });
-            }
+                super.broadcastMessage(msg);
+            } 
 
             @Override
-            protected Serializable createGroupid() {
-                return "";
+            protected CompletableFuture<Serializable> createUserid() {
+                return CompletableFuture.completedFuture("2");
             }
         };
         return socket;
@@ -113,19 +107,15 @@ public class VideoWebSocketServlet extends WebSocketServlet {
 
     public static void main(String[] args) throws Throwable {
         CountDownLatch cdl = new CountDownLatch(1);
-        AnyValue.DefaultAnyValue config = new AnyValue.DefaultAnyValue();
-        config.addValue("threads", System.getProperty("threads"));
-        config.addValue("bufferPoolSize", System.getProperty("bufferPoolSize"));
-        config.addValue("responsePoolSize", System.getProperty("responsePoolSize"));
-        config.addValue("host", System.getProperty("host", "0.0.0.0"));
-        config.addValue("port", System.getProperty("port", "8070"));
-        config.addValue("root", System.getProperty("root", "./root3/"));
-        AnyValue.DefaultAnyValue resConf = new AnyValue.DefaultAnyValue();
-        resConf.setValue("cacheMaxLength", "200M");
-        resConf.setValue("cacheMaxItemLength", "10M");
-        config.setValue("ResourceServlet", resConf);
+        AnyValue.DefaultAnyValue config = AnyValue.create()
+            .addValue("threads", System.getProperty("threads"))
+            .addValue("bufferPoolSize", System.getProperty("bufferPoolSize"))
+            .addValue("responsePoolSize", System.getProperty("responsePoolSize"))
+            .addValue("host", System.getProperty("host", "0.0.0.0"))
+            .addValue("port", System.getProperty("port", "8070"))
+            .addValue("root", System.getProperty("root", "./root3/"));
         HttpServer server = new HttpServer();
-        server.addHttpServlet(new VideoWebSocketServlet(), "/pipes", null, "/listen/*");
+        server.addHttpServlet("/pipes", new VideoWebSocketServlet(), "/listen/*");
         server.init(config);
         server.start();
         cdl.await();

@@ -10,17 +10,22 @@ import java.lang.reflect.Array;
 import java.util.*;
 import java.util.function.*;
 import static org.redkale.source.FilterExpress.*;
-import org.redkale.util.Attribute;
+import org.redkale.util.*;
 
 /**
- * 注意： 在调用 createSQLExpress 之前必须先调用 createSQLJoin 在调用 createPredicate 之前必须先调用 isCacheUseable
+ * 注意： <br>
+ * column的值以#开头的视为虚拟字段，不在过滤范围内 <br>
+ * 在调用 createSQLExpress 之前必须先调用 createSQLJoin <br>
+ * 在调用 createPredicate 之前必须先调用 isCacheUseable  <br>
+ *
  * <p>
- * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  */
-public class FilterNode {
+public class FilterNode {  //FilterNode 不能实现Serializable接口， 否则DataSource很多重载接口会出现冲突
+
+    protected boolean readOnly;
 
     protected String column;
 
@@ -52,9 +57,11 @@ public class FilterNode {
                     }
                     if (subval instanceof Range) {
                         exp = FilterExpress.BETWEEN;
-                    } else if (subval instanceof Collection) {
-                        exp = FilterExpress.IN;
-                    } else if (subval != null && val.getClass().isArray()) {
+//                    } else if (subval instanceof Collection) {
+//                        exp = FilterExpress.IN;
+//                    } else if (subval != null && val.getClass().isArray()) {
+//                        exp = FilterExpress.IN;
+                    } else {
                         exp = FilterExpress.IN;
                     }
                 } else { //空集合
@@ -64,7 +71,7 @@ public class FilterNode {
                 Class comp = val.getClass().getComponentType();
                 if (Range.class.isAssignableFrom(comp)) {
                     exp = FilterExpress.BETWEEN;
-                } else if (comp.isArray() || Collection.class.isAssignableFrom(comp)) {
+                } else {
                     exp = FilterExpress.IN;
                 }
             }
@@ -73,6 +80,61 @@ public class FilterNode {
         this.express = exp == null ? EQUAL : exp;
         this.itemand = itemand;
         this.value = val;
+    }
+
+    public FilterNode copy() {
+        return copy(new FilterNode());
+    }
+
+    protected FilterNode copy(FilterNode node) {
+        node.readOnly = this.readOnly;
+        node.column = this.column;
+        node.express = this.express;
+        node.value = this.value;
+        node.itemand = this.itemand;
+        node.or = this.or;
+        if (this.nodes != null) {
+            node.nodes = new FilterNode[this.nodes.length];
+            for (int i = 0; i < node.nodes.length; i++) {
+                node.nodes[i] = this.nodes[i] == null ? null : this.nodes[i].copy();
+            }
+        }
+        return node;
+    }
+
+    public FilterNode asReadOnly() {
+        this.readOnly = true;
+        return this;
+    }
+
+    public FilterNode readOnly(boolean readOnly) {
+        this.readOnly = readOnly;
+        return this;
+    }
+
+    public long findLongValue(final String col, long defValue) {
+        Serializable val = findValue(col);
+        return val == null ? defValue : ((Number) val).longValue();
+    }
+
+    public int findIntValue(final String col, int defValue) {
+        Serializable val = findValue(col);
+        return val == null ? defValue : ((Number) val).intValue();
+    }
+
+    public String findStringValue(final String col) {
+        return (String) findValue(col);
+    }
+
+    public Serializable findValue(final String col) {
+        if (this.column != null && this.column.equals(col)) return this.value;
+        if (this.nodes == null) return null;
+        for (FilterNode n : this.nodes) {
+            if (n == null) continue;
+            Serializable val = n.findValue(col);
+            if (val != null) return val;
+        }
+        return null;
     }
 
     public final FilterNode and(FilterNode node) {
@@ -108,6 +170,7 @@ public class FilterNode {
     }
 
     protected FilterNode any(FilterNode node, boolean signor) {
+        if (this.readOnly) throw new RuntimeException("FilterNode(" + this + ") is ReadOnly");
         Objects.requireNonNull(node);
         if (this.column == null) {
             this.column = node.column;
@@ -122,10 +185,7 @@ public class FilterNode {
             return this;
         }
         if (or == signor) {
-            FilterNode[] newsiblings = new FilterNode[nodes.length + 1];
-            System.arraycopy(nodes, 0, newsiblings, 0, nodes.length);
-            newsiblings[nodes.length] = node;
-            this.nodes = newsiblings;
+            this.nodes = Utility.append(this.nodes, node);
             return this;
         }
         FilterNode newnode = new FilterNode(this.column, this.express, this.itemand, this.value);
@@ -145,15 +205,18 @@ public class FilterNode {
      *
      * @param <T>         Entity类的泛型
      * @param func        EntityInfo的加载器
+     * @param update      是否用于更新的JOIN
      * @param joinTabalis 关联表集合
+     * @param haset       已拼接过的字段名
      * @param info        Entity类的EntityInfo
+     *
      * @return SQL的join语句 不存在返回null
      */
-    protected <T> CharSequence createSQLJoin(final Function<Class, EntityInfo> func, final Map<Class, String> joinTabalis, final EntityInfo<T> info) {
+    protected <T> CharSequence createSQLJoin(final Function<Class, EntityInfo> func, final boolean update, final Map<Class, String> joinTabalis, final Set<String> haset, final EntityInfo<T> info) {
         if (joinTabalis == null || this.nodes == null) return null;
         StringBuilder sb = null;
         for (FilterNode node : this.nodes) {
-            CharSequence cs = node.createSQLJoin(func, joinTabalis, info);
+            CharSequence cs = node.createSQLJoin(func, update, joinTabalis, haset, info);
             if (cs == null) continue;
             if (sb == null) sb = new StringBuilder();
             sb.append(cs);
@@ -192,6 +255,7 @@ public class FilterNode {
      * 该方法需要重载
      *
      * @param entityApplyer EntityInfo的加载器
+     *
      * @return 是否可以使用缓存
      */
     protected boolean isCacheUseable(final Function<Class, EntityInfo> entityApplyer) {
@@ -208,10 +272,12 @@ public class FilterNode {
      * @param <T>         Entity类的泛型
      * @param joinTabalis 关联表的集合
      * @param info        EntityInfo
+     *
      * @return JOIN的SQL语句
      */
     protected <T> CharSequence createSQLExpress(final EntityInfo<T> info, final Map<Class, String> joinTabalis) {
-        CharSequence sb0 = this.column == null || info == null ? null : createElementSQLExpress(info, joinTabalis == null ? null : joinTabalis.get(info.getType()));
+        CharSequence sb0 = this.column == null || this.column.isEmpty() || this.column.charAt(0) == '#' || info == null
+            ? null : createElementSQLExpress(info, joinTabalis == null ? null : joinTabalis.get(info.getType()));
         if (this.nodes == null) return sb0;
         final StringBuilder rs = new StringBuilder();
         rs.append('(');
@@ -249,6 +315,7 @@ public class FilterNode {
     }
 
     private static boolean needSplit(final FilterExpress express, final Object val0) {
+        if (val0 == null) return false;
         boolean items = express != IN && express != NOTIN;  //是否数组集合的表达式
         if (!items) {
             if (val0.getClass().isArray()) {
@@ -307,10 +374,13 @@ public class FilterNode {
     }
 
     private <T> CharSequence createElementSQLExpress(final EntityInfo<T> info, String talis, Object val0) {
-        if (column == null) return null;
+        if (column == null || this.column.isEmpty() || this.column.charAt(0) == '#') return null;
         if (talis == null) talis = "a";
         if (express == ISNULL || express == ISNOTNULL) {
             return new StringBuilder().append(info.getSQLColumn(talis, column)).append(' ').append(express.value());
+        }
+        if (express == ISEMPTY || express == ISNOTEMPTY) {
+            return new StringBuilder().append(info.getSQLColumn(talis, column)).append(' ').append(express.value()).append(" ''");
         }
         if (val0 == null) return null;
         if (express == FV_MOD || express == FV_DIV) {
@@ -319,7 +389,7 @@ public class FilterNode {
                 .append(' ').append(fv.getExpress().value()).append(' ').append(fv.getDestvalue());
         }
         final boolean fk = (val0 instanceof FilterKey);
-        CharSequence val = fk ? info.getSQLColumn(talis, ((FilterKey) val0).getColumn()) : formatToString(express, val0);
+        CharSequence val = fk ? info.getSQLColumn(talis, ((FilterKey) val0).getColumn()) : formatToString(express, info.getSQLValue(column, (Serializable) val0));
         if (val == null) return null;
         StringBuilder sb = new StringBuilder(32);
         if (express == CONTAIN) return info.containSQL.replace("${column}", info.getSQLColumn(talis, column)).replace("${keystr}", val);
@@ -327,7 +397,7 @@ public class FilterNode {
         if (express == NOTCONTAIN) return info.notcontainSQL.replace("${column}", info.getSQLColumn(talis, column)).replace("${keystr}", val);
         if (express == IGNORECASENOTCONTAIN) return info.notcontainSQL.replace("${column}", "LOWER(" + info.getSQLColumn(talis, column) + ")").replace("${keystr}", val);
 
-        if (express == IGNORECASELIKE || express == IGNORECASENOTLIKE) {
+        if (express == IGNORECASEEQUAL || express == IGNORECASENOTEQUAL || express == IGNORECASELIKE || express == IGNORECASENOTLIKE) {
             sb.append("LOWER(").append(info.getSQLColumn(talis, column)).append(')');
             if (fk) val = "LOWER(" + info.getSQLColumn(talis, ((FilterKey) val0).getColumn()) + ')';
         } else {
@@ -386,7 +456,7 @@ public class FilterNode {
     }
 
     protected final <T> Predicate<T> createElementPredicate(final EntityCache<T> cache, final boolean join) {
-        if (column == null) return null;
+        if (this.column == null || this.column.isEmpty() || this.column.charAt(0) == '#') return null;
         return createElementPredicate(cache, join, cache.getAttribute(column));
     }
 
@@ -428,8 +498,68 @@ public class FilterNode {
                 }
                 return filter;
             } else if (val0.getClass().isArray()) {
+                final Class primtype = val0.getClass();
+                Object val2 = val0;
+                int ix = -1;
+                if (primtype == boolean[].class) {
+                    boolean[] bs = (boolean[]) val0;
+                    Boolean[] ns = new Boolean[bs.length];
+                    for (boolean v : bs) {
+                        ns[++ix] = v;
+                    }
+                    val2 = ns;
+                } else if (primtype == byte[].class) {
+                    byte[] bs = (byte[]) val0;
+                    Byte[] ns = new Byte[bs.length];
+                    for (byte v : bs) {
+                        ns[++ix] = v;
+                    }
+                    val2 = ns;
+                } else if (primtype == short[].class) {
+                    short[] bs = (short[]) val0;
+                    Short[] ns = new Short[bs.length];
+                    for (short v : bs) {
+                        ns[++ix] = v;
+                    }
+                    val2 = ns;
+                } else if (primtype == char[].class) {
+                    char[] bs = (char[]) val0;
+                    Character[] ns = new Character[bs.length];
+                    for (char v : bs) {
+                        ns[++ix] = v;
+                    }
+                    val2 = ns;
+                } else if (primtype == int[].class) {
+                    int[] bs = (int[]) val0;
+                    Integer[] ns = new Integer[bs.length];
+                    for (int v : bs) {
+                        ns[++ix] = v;
+                    }
+                    val2 = ns;
+                } else if (primtype == float[].class) {
+                    float[] bs = (float[]) val0;
+                    Float[] ns = new Float[bs.length];
+                    for (float v : bs) {
+                        ns[++ix] = v;
+                    }
+                    val2 = ns;
+                } else if (primtype == long[].class) {
+                    long[] bs = (long[]) val0;
+                    Long[] ns = new Long[bs.length];
+                    for (long v : bs) {
+                        ns[++ix] = v;
+                    }
+                    val2 = ns;
+                } else if (primtype == double[].class) {
+                    double[] bs = (double[]) val0;
+                    Double[] ns = new Double[bs.length];
+                    for (double v : bs) {
+                        ns[++ix] = v;
+                    }
+                    val2 = ns;
+                }
                 Predicate<T> filter = null;
-                for (Object fv : (Object[]) val0) {
+                for (Object fv : (Object[]) val2) {
                     if (fv == null) continue;
                     Predicate<T> f = createElementPredicate(cache, join, attr, fv);
                     if (f == null) continue;
@@ -493,7 +623,32 @@ public class FilterNode {
                     return field + " != null";
                 }
             };
-        if (attr == null) return null;
+        if (express == ISEMPTY) return new Predicate<T>() {
+
+                @Override
+                public boolean test(T t) {
+                    Object v = attr.get(t);
+                    return v == null || v.toString().isEmpty();
+                }
+
+                @Override
+                public String toString() {
+                    return field + " = ''";
+                }
+            };
+        if (express == ISNOTEMPTY) return new Predicate<T>() {
+
+                @Override
+                public boolean test(T t) {
+                    Object v = attr.get(t);
+                    return v != null && !v.toString().isEmpty();
+                }
+
+                @Override
+                public String toString() {
+                    return field + " != ''";
+                }
+            };
         if (val0 == null) return null;
 
         final Class atype = attr.type();
@@ -637,6 +792,36 @@ public class FilterNode {
                         return field + ' ' + express.value() + ' ' + formatToString(val);
                     }
                 };
+            case IGNORECASEEQUAL:
+                return fk ? new Predicate<T>() {
+
+                    @Override
+                    public boolean test(T t) {
+                        Object rs = attr.get(t);
+                        Object rs2 = fkattr.get(t);
+                        if (rs == null && rs2 == null) return true;
+                        if (rs == null || rs2 == null) return false;
+                        return Objects.equals(rs.toString().toLowerCase(), rs2.toString().toLowerCase());
+                    }
+
+                    @Override
+                    public String toString() {
+                        return "LOWER(" + field + ") " + express.value() + " LOWER(" + fkattr.field() + ')';
+                    }
+                } : new Predicate<T>() {
+
+                    @Override
+                    public boolean test(T t) {
+                        Object rs = attr.get(t);
+                        if (rs == null) return false;
+                        return val.toString().equalsIgnoreCase(rs.toString());
+                    }
+
+                    @Override
+                    public String toString() {
+                        return "LOWER(" + field + ") " + express.value() + ' ' + formatToString(val);
+                    }
+                };
             case NOTEQUAL:
                 return fk ? new Predicate<T>() {
 
@@ -659,6 +844,36 @@ public class FilterNode {
                     @Override
                     public String toString() {
                         return field + ' ' + express.value() + ' ' + formatToString(val);
+                    }
+                };
+            case IGNORECASENOTEQUAL:
+                return fk ? new Predicate<T>() {
+
+                    @Override
+                    public boolean test(T t) {
+                        Object rs = attr.get(t);
+                        Object rs2 = fkattr.get(t);
+                        if (rs == null && rs2 == null) return false;
+                        if (rs == null || rs2 == null) return true;
+                        return !Objects.equals(rs.toString().toLowerCase(), rs2.toString().toLowerCase());
+                    }
+
+                    @Override
+                    public String toString() {
+                        return "LOWER(" + field + ") " + express.value() + " LOWER(" + fkattr.field() + ')';
+                    }
+                } : new Predicate<T>() {
+
+                    @Override
+                    public boolean test(T t) {
+                        Object rs = attr.get(t);
+                        if (rs == null) return true;
+                        return !val.toString().equalsIgnoreCase(rs.toString());
+                    }
+
+                    @Override
+                    public String toString() {
+                        return "LOWER(" + field + ") " + express.value() + ' ' + formatToString(val);
                     }
                 };
             case GREATERTHAN:
@@ -1530,7 +1745,7 @@ public class FilterNode {
     protected StringBuilder toString(final String prefix) {
         StringBuilder sb = new StringBuilder();
         StringBuilder element = toElementString(prefix);
-        boolean more = element.length() > 0 && this.nodes != null;
+        boolean more = element != null && element.length() > 0 && this.nodes != null;
         if (more) sb.append('(');
         sb.append(element);
         if (this.nodes != null) {
@@ -1586,6 +1801,8 @@ public class FilterNode {
             String col = prefix == null ? column : (prefix + "." + column);
             if (express == ISNULL || express == ISNOTNULL) {
                 sb.append(col).append(' ').append(express.value());
+            } else if (express == ISEMPTY || express == ISNOTEMPTY) {
+                sb.append(col).append(' ').append(express.value()).append(" ''");
             } else if (ev != null) {
                 boolean lower = (express == IGNORECASELIKE || express == IGNORECASENOTLIKE || express == IGNORECASECONTAIN || express == IGNORECASENOTCONTAIN);
                 sb.append(lower ? ("LOWER(" + col + ')') : col).append(' ').append(express.value()).append(' ').append(formatToString(express, ev));
@@ -1594,7 +1811,7 @@ public class FilterNode {
         return sb;
     }
 
-    protected static CharSequence formatToString(Object value) {
+    private static CharSequence formatToString(Object value) {
         CharSequence sb = formatToString(null, value);
         return sb == null ? null : sb.toString();
     }
@@ -1611,7 +1828,8 @@ public class FilterNode {
                 value = "%" + value;
             } else if (express == IGNORECASELIKE || express == IGNORECASENOTLIKE) {
                 value = "%" + value.toString().toLowerCase() + '%';
-            } else if (express == IGNORECASECONTAIN || express == IGNORECASENOTCONTAIN) {
+            } else if (express == IGNORECASECONTAIN || express == IGNORECASENOTCONTAIN
+                || express == IGNORECASEEQUAL || express == IGNORECASENOTEQUAL) {
                 value = value.toString().toLowerCase();
             }
             return new StringBuilder().append('\'').append(value.toString().replace("'", "\\'")).append('\'');
@@ -1674,6 +1892,14 @@ public class FilterNode {
 
     public final void setValue(Serializable value) {
         this.value = value;
+    }
+
+    public boolean isReadOnly() {
+        return readOnly;
+    }
+
+    public void setReadOnly(boolean readOnly) {
+        this.readOnly = readOnly;
     }
 
     public final boolean isOr() {

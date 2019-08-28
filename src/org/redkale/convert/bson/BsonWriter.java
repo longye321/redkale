@@ -6,14 +6,14 @@
 package org.redkale.convert.bson;
 
 import java.nio.ByteBuffer;
-import java.util.function.Predicate;
 import org.redkale.convert.*;
+import org.redkale.convert.ext.ByteSimpledCoder;
 import org.redkale.util.*;
 
 /**
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  */
@@ -28,19 +28,7 @@ public class BsonWriter extends Writer {
     protected boolean tiny;
 
     public static ObjectPool<BsonWriter> createPool(int max) {
-        return new ObjectPool<BsonWriter>(max, new Creator<BsonWriter>() {
-
-            @Override
-            public BsonWriter create(Object... params) {
-                return new BsonWriter();
-            }
-        }, null, new Predicate<BsonWriter>() {
-
-            @Override
-            public boolean test(BsonWriter t) {
-                return t.recycle();
-            }
-        });
+        return new ObjectPool<>(max, (Object... params) -> new BsonWriter(), null, (t) -> t.recycle());
     }
 
     public byte[] toArray() {
@@ -82,6 +70,7 @@ public class BsonWriter extends Writer {
      * 扩充指定长度的缓冲区
      *
      * @param len 扩容长度
+     *
      * @return 固定0
      */
     protected int expand(int len) {
@@ -110,6 +99,7 @@ public class BsonWriter extends Writer {
 
     protected boolean recycle() {
         this.count = 0;
+        this.specify = null;
         if (this.content.length > defaultSize) {
             this.content = new byte[defaultSize];
         }
@@ -134,6 +124,22 @@ public class BsonWriter extends Writer {
     @Override
     public final void writeByte(byte value) {
         writeTo(value);
+    }
+
+    @Override
+    public final void writeByteArray(byte[] values) {
+        if (values == null) {
+            writeNull();
+            return;
+        }
+        writeArrayB(values.length, null, values);
+        boolean flag = false;
+        for (byte v : values) {
+            if (flag) writeArrayMark();
+            writeByte(v);
+            flag = true;
+        }
+        writeArrayE();
     }
 
     @Override
@@ -178,10 +184,11 @@ public class BsonWriter extends Writer {
     }
 
     @Override
-    public final void writeObjectB(Object obj) {
+    public final int writeObjectB(Object obj) {
         super.writeObjectB(obj);
         writeSmallString("");
         writeShort(BsonReader.SIGN_OBJECTB);
+        return -1;
     }
 
     @Override
@@ -191,49 +198,11 @@ public class BsonWriter extends Writer {
     }
 
     @Override
-    public final void writeFieldName(Attribute attribute) {
+    public final void writeFieldName(EnMember member) {
+        Attribute attribute = member.getAttribute();
         writeByte(BsonReader.SIGN_HASNEXT);
         writeSmallString(attribute.field());
-        byte typeval = 127;  //字段的类型值
-        final Class type = attribute.type();
-        if (type == boolean.class || type == Boolean.class) {
-            typeval = 1;
-        } else if (type == byte.class || type == Byte.class) {
-            typeval = 2;
-        } else if (type == short.class || type == Short.class) {
-            typeval = 3;
-        } else if (type == char.class || type == Character.class) {
-            typeval = 4;
-        } else if (type == int.class || type == Integer.class) {
-            typeval = 5;
-        } else if (type == long.class || type == Long.class) {
-            typeval = 6;
-        } else if (type == float.class || type == Float.class) {
-            typeval = 7;
-        } else if (type == double.class || type == Double.class) {
-            typeval = 8;
-        } else if (type == String.class) {
-            typeval = 9;
-        } else if (type == boolean[].class || type == Boolean[].class) {
-            typeval = 101;
-        } else if (type == byte[].class || type == Byte[].class) {
-            typeval = 102;
-        } else if (type == short[].class || type == Short[].class) {
-            typeval = 103;
-        } else if (type == char[].class || type == Character[].class) {
-            typeval = 104;
-        } else if (type == int[].class || type == Integer[].class) {
-            typeval = 105;
-        } else if (type == long[].class || type == Long[].class) {
-            typeval = 106;
-        } else if (type == float[].class || type == Float[].class) {
-            typeval = 107;
-        } else if (type == double[].class || type == Double[].class) {
-            typeval = 108;
-        } else if (type == String[].class) {
-            typeval = 109;
-        }
-        writeByte(typeval);
+        writeByte(BsonFactory.typeEnum(attribute.type()));
     }
 
     /**
@@ -248,11 +217,11 @@ public class BsonWriter extends Writer {
             return;
         }
         char[] chars = Utility.charArray(value);
-        if (chars.length > 255) throw new ConvertException("'" + value + "' has  very long length");
+        if (chars.length > 255) throw new ConvertException("'" + value + "' have  very long length");
         byte[] bytes = new byte[chars.length + 1];
         bytes[0] = (byte) chars.length;
         for (int i = 0; i < chars.length; i++) {
-            if (chars[i] > Byte.MAX_VALUE) throw new ConvertException("'" + value + "'  has double-word");
+            if (chars[i] > Byte.MAX_VALUE) throw new ConvertException("'" + value + "'  have double-word");
             bytes[i + 1] = (byte) chars[i];
         }
         writeTo(bytes);
@@ -273,13 +242,22 @@ public class BsonWriter extends Writer {
     }
 
     @Override
+    public final void writeWrapper(StringConvertWrapper value) {
+        this.writeString(value == null ? null : value.getValue());
+    }
+
+    @Override
     public final void writeNull() {
         writeShort(Reader.SIGN_NULL);
     }
 
     @Override
-    public final void writeArrayB(int size) {
+    public final int writeArrayB(int size, Encodeable<Writer, Object> componentEncoder, Object obj) {
         writeInt(size);
+        if (componentEncoder != null && componentEncoder != ByteSimpledCoder.instance) {
+            writeByte(BsonFactory.typeEnum(componentEncoder.getType()));
+        }
+        return -1;
     }
 
     @Override
@@ -291,8 +269,11 @@ public class BsonWriter extends Writer {
     }
 
     @Override
-    public void writeMapB(int size) {
-        writeArrayB(size);
+    public int writeMapB(int size, Encodeable<Writer, Object> keyEncoder, Encodeable<Writer, Object> valueEncoder, Object obj) {
+        writeInt(size);
+        writeByte(BsonFactory.typeEnum(keyEncoder.getType()));
+        writeByte(BsonFactory.typeEnum(valueEncoder.getType()));
+        return -1;
     }
 
     @Override

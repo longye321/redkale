@@ -11,12 +11,12 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import javax.persistence.Transient;
 import static org.redkale.source.FilterExpress.*;
-import org.redkale.util.Attribute;
+import org.redkale.util.*;
 
 /**
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  * @param <T> FilterBean泛型
@@ -63,7 +63,7 @@ public final class FilterNodeBean<T extends FilterBean> implements Comparable<Fi
         this.nodeBeans = bean == null ? null : bean.nodeBeans;
     }
 
-    private FilterNodeBean(final FilterJoinColumn joinCol, final FilterColumn filterCol, final Attribute<T, Serializable> attr) {
+    private FilterNodeBean(final FilterJoinColumn joinCol, final FilterColumn filterCol, final Attribute<T, Serializable> attr, final Type genericType) {
         this.beanAttr = attr;
         this.joinClass = joinCol == null ? null : joinCol.table();
         this.joinColumns = joinCol == null ? null : joinCol.columns();
@@ -72,8 +72,13 @@ public final class FilterNodeBean<T extends FilterBean> implements Comparable<Fi
         this.column = (filterCol != null && !filterCol.name().isEmpty()) ? filterCol.name() : attr.field();
 
         FilterExpress exp = filterCol == null ? null : filterCol.express();
+        Class compType = type.getComponentType();
+        if (Collection.class.isAssignableFrom(type) && genericType instanceof ParameterizedType) {
+            Type pt = ((ParameterizedType) genericType).getActualTypeArguments()[0];
+            if (pt instanceof Class) compType = (Class) pt;
+        }
         if ((exp == null || exp == EQUAL) && (type.isArray() || Collection.class.isAssignableFrom(type))) {
-            if (Range.class.isAssignableFrom(type.getComponentType())) {
+            if (compType != null && Range.class.isAssignableFrom(compType)) {
                 if (AND != exp) exp = OR;
             } else if (NOTIN != exp) {
                 exp = IN;
@@ -117,10 +122,7 @@ public final class FilterNodeBean<T extends FilterBean> implements Comparable<Fi
             return this;
         }
         if (or == signor) {
-            FilterNodeBean[] newsiblings = new FilterNodeBean[nodeBeans.length + 1];
-            System.arraycopy(nodeBeans, 0, newsiblings, 0, nodeBeans.length);
-            newsiblings[nodeBeans.length] = node;
-            this.nodeBeans = newsiblings;
+            this.nodeBeans = Utility.append(this.nodeBeans, node);
             return this;
         }
         this.nodeBeans = new FilterNodeBean[]{new FilterNodeBean(this), node};
@@ -181,12 +183,18 @@ public final class FilterNodeBean<T extends FilterBean> implements Comparable<Fi
                 try {
                     getter = cltmp.getMethod(((t == boolean.class || t == Boolean.class) ? "is" : "get") + new String(chars));
                 } catch (Exception ex) {
-                    if (!pubmod) continue;
+                    if (t == Boolean.class) {
+                        try {
+                            getter = cltmp.getMethod("get" + new String(chars));
+                        } catch (Exception ex2) {
+                            if (!pubmod) continue;
+                        }
+                    } else if (!pubmod) continue;
                 }
                 fields.add(field.getName());
 
                 final Attribute<T, Serializable> beanAttr = pubmod ? Attribute.create(field) : Attribute.create(getter, null);
-                FilterNodeBean<T> nodeBean = new FilterNodeBean(field.getAnnotation(FilterJoinColumn.class), field.getAnnotation(FilterColumn.class), beanAttr);
+                FilterNodeBean<T> nodeBean = new FilterNodeBean(field.getAnnotation(FilterJoinColumn.class), field.getAnnotation(FilterColumn.class), beanAttr, field.getGenericType());
 
                 //------------------------------------
                 {
@@ -353,8 +361,11 @@ public final class FilterNodeBean<T extends FilterBean> implements Comparable<Fi
             String col = prefix == null ? column : (prefix + "." + column);
             if (express == ISNULL || express == ISNOTNULL) {
                 sb.append(col).append(' ').append(express.value());
+            } else if (express == ISEMPTY || express == ISNOTEMPTY) {
+                sb.append(col).append(' ').append(express.value()).append(" ''");
             } else {
-                boolean lower = (express == IGNORECASELIKE || express == IGNORECASENOTLIKE || express == IGNORECASECONTAIN || express == IGNORECASENOTCONTAIN);
+                boolean lower = (express == IGNORECASEEQUAL || express == IGNORECASENOTEQUAL || express == IGNORECASELIKE
+                    || express == IGNORECASENOTLIKE || express == IGNORECASECONTAIN || express == IGNORECASENOTCONTAIN);
                 sb.append(lower ? ("LOWER(" + col + ')') : col).append(' ').append(express.value()).append(" ?");
             }
         }

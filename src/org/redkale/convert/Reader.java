@@ -6,13 +6,18 @@
 package org.redkale.convert;
 
 /**
+ * 反序列化的数据读取流
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  */
 public abstract class Reader {
+
+    public static enum ValueType {
+        STRING, ARRAY, MAP;
+    }
 
     //当前对象字段名的游标
     protected int fieldIndex;
@@ -21,12 +26,46 @@ public abstract class Reader {
 
     public static final short SIGN_NOLENGTH = -2;
 
+    public static final short SIGN_NOLENBUTBYTES = -3; //目前只适合于protobuf的boolean[]...double[]类型
+
     /**
-     * 是否还存在下个元素或字段
+     * 是否还存在下个元素或字段 <br>
+     * 注意: 主要用于Array、Collection、Stream或Map等集合对象
+     *
+     * @param startPosition 起始位置
+     * @param contentLength 内容大小， 不确定的传-1
      *
      * @return 是否还存在下个元素或字段
      */
-    public abstract boolean hasNext();
+    public abstract boolean hasNext(int startPosition, int contentLength);
+
+    /**
+     * 是否还存在下个元素或字段
+     *
+     *
+     * @return 是否还存在下个元素或字段
+     */
+    public boolean hasNext() {
+        return hasNext(-1, -1);
+    }
+
+    /**
+     * 获取当前位置
+     *
+     * @return 当前位置
+     */
+    public abstract int position();
+
+    /**
+     * 读取字段值内容的字节数 <br>
+     * 只有在readXXXB方法返回SIGN_NOLENBUTBYTES值才会调用此方法
+     *
+     * @param member  DeMember
+     * @param decoder Decodeable
+     *
+     * @return 内容大小， 不确定返回-1
+     */
+    public abstract int readMemberContentLength(DeMember member, Decodeable decoder);
 
     /**
      * 跳过值(不包含值前面的字段)
@@ -39,9 +78,17 @@ public abstract class Reader {
     public abstract void readBlank();
 
     /**
+     * 读取下个值的类型
+     *
+     * @return ValueType
+     */
+    public abstract ValueType readType();
+
+    /**
      * 读取对象的类名， 返回 null 表示对象为null， 返回空字符串表示当前class与返回的class一致，返回非空字符串表示class是当前class的子类。
      *
      * @param clazz 类名
+     *
      * @return 返回字段数
      */
     public String readObjectB(final Class clazz) {
@@ -59,9 +106,13 @@ public abstract class Reader {
     /**
      * 读取数组的开头并返回数组的长度
      *
+     * @param member           DeMember
+     * @param typevals         byte[]
+     * @param componentDecoder Decodeable
+     *
      * @return 返回数组的长度
      */
-    public abstract int readArrayB();
+    public abstract int readArrayB(DeMember member, byte[] typevals, Decodeable componentDecoder);
 
     /**
      * 读取数组的尾端
@@ -72,9 +123,14 @@ public abstract class Reader {
     /**
      * 读取map的开头并返回map的size
      *
+     * @param member       DeMember
+     * @param typevals     byte[]
+     * @param keyDecoder   Decodeable
+     * @param valueDecoder Decodeable
+     *
      * @return 返回map的size
      */
-    public abstract int readMapB();
+    public abstract int readMapB(DeMember member, byte[] typevals, Decodeable keyDecoder, Decodeable valueDecoder);
 
     /**
      * 读取数组的尾端
@@ -86,6 +142,7 @@ public abstract class Reader {
      * 根据字段读取字段对应的DeMember
      *
      * @param members DeMember的全量集合
+     *
      * @return 匹配的DeMember
      */
     public abstract DeMember readFieldName(final DeMember[] members);
@@ -103,6 +160,13 @@ public abstract class Reader {
      * @return byte值
      */
     public abstract byte readByte();
+
+    /**
+     * 读取byte[]
+     *
+     * @return byte[]
+     */
+    public abstract byte[] readByteArray();
 
     /**
      * 读取一个char值

@@ -11,7 +11,11 @@ import org.redkale.convert.*;
 import static org.redkale.convert.Reader.*;
 
 /**
+ * 以ByteBuffer为数据载体的JsonReader   <br>
+ *
  * 只支持UTF-8格式
+ *
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  */
@@ -25,7 +29,10 @@ public class JsonByteBufferReader extends JsonReader {
 
     private ByteBuffer currentBuffer;
 
-    protected JsonByteBufferReader(ByteBuffer... buffers) {
+    protected ConvertMask mask;
+
+    protected JsonByteBufferReader(ConvertMask mask, ByteBuffer... buffers) {
+        this.mask = mask;
         this.buffers = buffers;
         if (buffers != null && buffers.length > 0) this.currentBuffer = buffers[currentIndex];
     }
@@ -37,19 +44,20 @@ public class JsonByteBufferReader extends JsonReader {
         this.currentChar = 0;
         this.currentBuffer = null;
         this.buffers = null;
+        this.mask = null;
         return false;
     }
 
     protected byte nextByte() {
         if (this.currentBuffer.hasRemaining()) {
             this.position++;
-            return this.currentBuffer.get();
+            return mask == null ? this.currentBuffer.get() : mask.unmask(this.currentBuffer.get());
         }
         for (;;) {
             this.currentBuffer = this.buffers[++this.currentIndex];
             if (this.currentBuffer.hasRemaining()) {
                 this.position++;
-                return this.currentBuffer.get();
+                return mask == null ? this.currentBuffer.get() : mask.unmask(this.currentBuffer.get());
             }
         }
     }
@@ -118,21 +126,39 @@ public class JsonByteBufferReader extends JsonReader {
         if (ch == '{') return "";
         if (ch == 'n' && nextChar() == 'u' && nextChar() == 'l' && nextChar() == 'l') return null;
         if (ch == 'N' && nextChar() == 'U' && nextChar() == 'L' && nextChar() == 'L') return null;
-        throw new ConvertException("a json object text must begin with '{' (position = " + position + ") but '" + ch + "'");
+        StringBuilder sb = new StringBuilder();
+        sb.append(ch);
+        char one;
+        try {
+            while ((one = nextChar()) != 0) sb.append(one);
+        } catch (Exception e) {
+        }
+        throw new ConvertException("a json object text must begin with '{' (position = " + position + ") but '" + ch + "' in (" + sb + ")");
     }
 
     /**
      * 判断下一个非空白字符是否为[
      *
+     * @param member   DeMember
+     * @param typevals byte[]
+     * @param decoder  Decodeable
+     *
      * @return SIGN_NOLENGTH 或 SIGN_NULL
      */
     @Override
-    public final int readArrayB() {
+    public final int readArrayB(DeMember member, byte[] typevals, Decodeable decoder) {
         char ch = nextGoodChar();
         if (ch == '[' || ch == '{') return SIGN_NOLENGTH;
         if (ch == 'n' && nextChar() == 'u' && nextChar() == 'l' && nextChar() == 'l') return SIGN_NULL;
         if (ch == 'N' && nextChar() == 'U' && nextChar() == 'L' && nextChar() == 'L') return SIGN_NULL;
-        throw new ConvertException("a json array text must begin with '[' (position = " + position + ") but '" + ch + "'");
+        StringBuilder sb = new StringBuilder();
+        sb.append(ch);
+        char one;
+        try {
+            while ((one = nextChar()) != 0) sb.append(one);
+        } catch (Exception e) {
+        }
+        throw new ConvertException("a json array text must begin with '[' (position = " + position + ") but '" + ch + "' in (" + sb + ")");
     }
 
     /**
@@ -142,19 +168,29 @@ public class JsonByteBufferReader extends JsonReader {
     public final void readBlank() {
         char ch = nextGoodChar();
         if (ch == ':') return;
-        throw new ConvertException("expected a ':' but '" + ch + "'(position = " + position + ")");
+        StringBuilder sb = new StringBuilder();
+        sb.append(ch);
+        char one;
+        try {
+            while ((one = nextChar()) != 0) sb.append(one);
+        } catch (Exception e) {
+        }
+        throw new ConvertException("expected a ':' but '" + ch + "'(position = " + position + ") in (" + sb + ")");
     }
 
     /**
      * 判断对象是否存在下一个属性或者数组是否存在下一个元素
      *
+     * @param startPosition 起始位置
+     * @param contentLength 内容大小， 不确定的传-1
+     *
      * @return 是否存在
      */
     @Override
-    public final boolean hasNext() {
+    public boolean hasNext(int startPosition, int contentLength) {
         char ch = nextGoodChar();
         if (ch == ',') return true;
-        if (ch == '}' || ch == ']') return false;
+        if (ch == '}' || ch == ']' || ch == 0) return false;
         backChar(ch); // { [ 交由 readObjectB 或 readMapB 或 readArrayB 读取
         return true;
     }
@@ -245,6 +281,7 @@ public class JsonByteBufferReader extends JsonReader {
                             throw new ConvertException("illegal escape(" + c + ") (position = " + this.position + ")");
                     }
                 } else if (ch == ',' || ch == ']' || ch == '}' || ch <= ' ' || ch == ':') { //  ch <= ' ' 包含 0
+                    backChar(ch);
                     break;
                 } else {
                     sb.append(ch);
@@ -263,8 +300,10 @@ public class JsonByteBufferReader extends JsonReader {
     @Override
     public final int readInt() {
         char firstchar = nextGoodChar();
+        boolean quote = false;
         if (firstchar == '"' || firstchar == '\'') {
-            firstchar = nextChar();
+            quote = true;
+            firstchar = nextGoodChar();
             if (firstchar == '"' || firstchar == '\'') return 0;
         }
         int value = 0;
@@ -279,6 +318,7 @@ public class JsonByteBufferReader extends JsonReader {
             if (ch >= '0' && ch <= '9') {
                 value = (value << 3) + (value << 1) + (ch - '0');
             } else if (ch == '"' || ch == '\'') {
+            } else if (quote && ch <= ' ') {
             } else if (ch == ',' || ch == '}' || ch == ']' || ch <= ' ' || ch == ':') {
                 backChar(ch);
                 break;
@@ -297,8 +337,10 @@ public class JsonByteBufferReader extends JsonReader {
     @Override
     public final long readLong() {
         char firstchar = nextGoodChar();
+        boolean quote = false;
         if (firstchar == '"' || firstchar == '\'') {
-            firstchar = nextChar();
+            quote = true;
+            firstchar = nextGoodChar();
             if (firstchar == '"' || firstchar == '\'') return 0L;
         }
         long value = 0;
@@ -313,6 +355,7 @@ public class JsonByteBufferReader extends JsonReader {
             if (ch >= '0' && ch <= '9') {
                 value = (value << 3) + (value << 1) + (ch - '0');
             } else if (ch == '"' || ch == '\'') {
+            } else if (quote && ch <= ' ') {
             } else if (ch == ',' || ch == '}' || ch == ']' || ch <= ' ' || ch == ':') {
                 backChar(ch);
                 break;

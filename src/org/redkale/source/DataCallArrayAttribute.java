@@ -12,12 +12,13 @@ import org.redkale.util.*;
 /**
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  * @param <T> Entity类的类型
  * @param <F> 字段的类型
  */
+@SuppressWarnings("unchecked")
 public final class DataCallArrayAttribute<T, F> implements Attribute<T[], F> {
 
     public static final DataCallArrayAttribute instance = new DataCallArrayAttribute();

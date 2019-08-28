@@ -9,26 +9,25 @@ import java.io.*;
 import java.nio.ByteBuffer;
 import static java.nio.file.StandardWatchEventKinds.*;
 import java.nio.file.*;
-import static java.nio.file.StandardWatchEventKinds.*;
 import java.util.AbstractMap.SimpleEntry;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
-import java.util.function.Predicate;
 import java.util.logging.*;
 import java.util.regex.*;
 import org.redkale.util.AnyValue;
 
 /**
+ * 静态资源HttpServlet
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  */
-public final class HttpResourceServlet extends HttpServlet {
+public class HttpResourceServlet extends HttpServlet {
 
-    private static final Logger logger = Logger.getLogger(HttpResourceServlet.class.getSimpleName());
+    protected final Logger logger = Logger.getLogger(this.getClass().getSimpleName());
 
     protected class WatchThread extends Thread {
 
@@ -38,7 +37,7 @@ public final class HttpResourceServlet extends HttpServlet {
 
         public WatchThread(File root) throws IOException {
             this.root = root;
-            this.setName("Servlet-ResourceWatch-Thread");
+            this.setName("HttpResourceServlet-Watch-Thread");
             this.setDaemon(true);
             this.watcher = this.root.toPath().getFileSystem().newWatchService();
         }
@@ -60,11 +59,17 @@ public final class HttpResourceServlet extends HttpServlet {
                             final String uri = path.toString().substring(rootstr.length()).replace('\\', '/');
                             //logger.log(Level.FINEST, "file(" + uri + ") happen " + event.kind() + " event");
                             if (event.kind() == ENTRY_DELETE) {
-                                files.remove(uri);
+                                FileEntry en = files.remove(uri);
+                                if (en != null) en.remove();
                             } else if (event.kind() == ENTRY_MODIFY) {
                                 FileEntry en = files.get(uri);
-                                if (en != null) {
-                                    Thread.sleep(5000L);  //等待update file完毕
+                                if (en != null && en.file != null) {
+                                    long d;  //等待update file完毕
+                                    for (;;) {
+                                        d = en.file.lastModified();
+                                        Thread.sleep(2000L);
+                                        if (d == en.file.lastModified()) break;
+                                    }
                                     en.update();
                                 }
                             }
@@ -79,17 +84,20 @@ public final class HttpResourceServlet extends HttpServlet {
         }
     }
 
-    protected final boolean finest = logger.isLoggable(Level.FINEST);
-
-    //缓存总大小, 默认128M
-    protected long cachelimit = 128 * 1024 * 1024L;
-
     protected final LongAdder cachedLength = new LongAdder();
+
+    //缓存总大小, 默认0
+    protected long cachelimit = 0 * 1024 * 1024L;
 
     //最大可缓存的文件大小，  大于该值的文件将不被缓存
     protected long cachelengthmax = 1 * 1024 * 1024;
 
+    //是否监控缓存文件的变化， 默认不监控
+    protected boolean watch = false;
+
     protected File root = new File("./root/");
+
+    protected String indexHtml = "index.html";
 
     protected final ConcurrentHashMap<String, FileEntry> files = new ConcurrentHashMap<>();
 
@@ -99,26 +107,24 @@ public final class HttpResourceServlet extends HttpServlet {
 
     protected WatchThread watchThread;
 
-    protected Predicate<String> ranges;
-
     @Override
     public void init(HttpContext context, AnyValue config) {
         if (config != null) {
             String rootstr = config.getValue("webroot", "root");
+            this.indexHtml = config.getValue("index", "index.html");
             if (rootstr.indexOf(':') < 0 && rootstr.indexOf('/') != 0 && System.getProperty("APP_HOME") != null) {
                 rootstr = new File(System.getProperty("APP_HOME"), rootstr).getPath();
             }
-            String rangesValue = config.getValue("ranges");
-            this.ranges = rangesValue != null ? Pattern.compile(rangesValue).asPredicate() : null;
             try {
                 this.root = new File(rootstr).getCanonicalFile();
             } catch (IOException ioe) {
                 this.root = new File(rootstr);
             }
-            AnyValue cacheconf = config.getAnyValue("caches");
+            AnyValue cacheconf = config.getAnyValue("cache");
             if (cacheconf != null) {
                 this.cachelimit = parseLenth(cacheconf.getValue("limit"), 0 * 1024 * 1024L);
                 this.cachelengthmax = parseLenth(cacheconf.getValue("lengthmax"), 1 * 1024 * 1024L);
+                this.watch = cacheconf.getBoolValue("watch", false);
             }
             List<SimpleEntry<Pattern, String>> locations = new ArrayList<>();
             for (AnyValue av : config.getAnyValues("rewrite")) {
@@ -133,7 +139,7 @@ public final class HttpResourceServlet extends HttpServlet {
             this.locationRewrites = locations.isEmpty() ? null : locations.toArray(new SimpleEntry[locations.size()]);
         }
         if (this.cachelimit < 1) return;  //不缓存不需要开启WatchThread监听
-        if (this.root != null) {
+        if (this.root != null && this.watch) {
             try {
                 this.watchThread = new WatchThread(this.root);
                 this.watchThread.start();
@@ -155,7 +161,25 @@ public final class HttpResourceServlet extends HttpServlet {
         }
     }
 
-    private static long parseLenth(String value, long defValue) {
+    public void setRoot(String rootstr) {
+        if (rootstr == null) return;
+        try {
+            this.root = new File(rootstr).getCanonicalFile();
+        } catch (IOException ioe) {
+            this.root = new File(rootstr);
+        }
+    }
+
+    public void setRoot(File file) {
+        if (file == null) return;
+        try {
+            this.root = file.getCanonicalFile();
+        } catch (IOException ioe) {
+            this.root = file;
+        }
+    }
+
+    protected static long parseLenth(String value, long defValue) {
         if (value == null) return defValue;
         value = value.toUpperCase().replace("B", "");
         if (value.endsWith("G")) return Long.decode(value.replace("G", "")) * 1024 * 1024 * 1024;
@@ -167,6 +191,11 @@ public final class HttpResourceServlet extends HttpServlet {
     @Override
     public void execute(HttpRequest request, HttpResponse response) throws IOException {
         String uri = request.getRequestURI();
+        if (uri.contains("../")) {
+            if (logger.isLoggable(Level.FINEST)) logger.log(Level.FINEST, "Not found resource (404) be " + uri + ", request = " + request);
+            response.finish404();
+            return;
+        }
         if (locationRewrites != null) {
             for (SimpleEntry<Pattern, String> entry : locationRewrites) {
                 Matcher matcher = entry.getKey().matcher(uri);
@@ -179,25 +208,31 @@ public final class HttpResourceServlet extends HttpServlet {
                 }
             }
         }
-        if (uri.length() == 0 || uri.equals("/")) uri = "/index.html";
+        if (uri.length() == 0 || uri.equals("/")) {
+            uri = this.indexHtml.indexOf('/') == 0 ? this.indexHtml : ("/" + this.indexHtml);
+        }
         //System.out.println(request);
         FileEntry entry;
-        if (watchThread == null) {
+        if (watchThread == null && files.isEmpty()) {
             entry = createFileEntry(uri);
         } else {  //有缓存
             entry = files.computeIfAbsent(uri, x -> createFileEntry(x));
         }
         if (entry == null) {
-            if (finest) logger.log(Level.FINEST, "Not found resource (404), request = " + request);
+            if (logger.isLoggable(Level.FINER)) logger.log(Level.FINER, "Not found resource (404), request = " + request);
             response.finish404();
         } else {
-            response.finishFile(entry.file, entry.content);
+            //file = null 表示资源内容在内存而不是在File中
+            //file = null 时必须传 filename
+            response.finishFile(entry.file == null ? entry.filename : null, entry.file, entry.content);
         }
     }
 
-    private FileEntry createFileEntry(String uri) {
-        File file = new File(root, uri);
-        if (file.isDirectory()) file = new File(file, "index.html");
+    protected FileEntry createFileEntry(String uri) {
+        File rfile = new File(root, uri);
+        File file = rfile;
+        if (file.isDirectory()) file = new File(rfile, this.indexHtml);
+        if (file.isDirectory()) file = new File(rfile, "index.html");
         if (!file.isFile() || !file.canRead()) return null;
         FileEntry en = new FileEntry(this, file);
         if (watchThread == null) return en;
@@ -210,21 +245,52 @@ public final class HttpResourceServlet extends HttpServlet {
         return en;
     }
 
-    private static final class FileEntry {
+    protected static class FileEntry {
 
-        final File file;
+        protected final String filename;
 
-        private final HttpResourceServlet servlet;
+        protected final File file; //如果所有资源文件打包成zip文件则file=null
 
-        ByteBuffer content;
+        protected final HttpResourceServlet servlet;
+
+        protected ByteBuffer content;
 
         public FileEntry(final HttpResourceServlet servlet, File file) {
             this.servlet = servlet;
             this.file = file;
+            this.filename = file.getName();
             update();
         }
 
+        public FileEntry(final HttpResourceServlet servlet, String filename, ByteBuffer content) {
+            this.servlet = servlet;
+            this.file = null;
+            this.filename = filename;
+            this.content = content.asReadOnlyBuffer();
+            this.servlet.cachedLength.add(this.content.remaining());
+        }
+
+        public FileEntry(final HttpResourceServlet servlet, String filename, InputStream in) throws IOException {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] bytes = new byte[10240];
+            int pos;
+            while ((pos = in.read(bytes)) != -1) {
+                out.write(bytes, 0, pos);
+            }
+            byte[] bs = out.toByteArray();
+            ByteBuffer buf = ByteBuffer.allocateDirect(bs.length);
+            buf.put(bs);
+            buf.flip();
+
+            this.servlet = servlet;
+            this.file = null;
+            this.filename = filename;
+            this.content = buf.asReadOnlyBuffer();
+            this.servlet.cachedLength.add(this.content.remaining());
+        }
+
         public void update() {
+            if (this.file == null) return;
             if (this.content != null) {
                 this.servlet.cachedLength.add(0L - this.content.remaining());
                 this.content = null;
@@ -248,14 +314,12 @@ public final class HttpResourceServlet extends HttpServlet {
                 this.content = buf.asReadOnlyBuffer();
                 this.servlet.cachedLength.add(this.content.remaining());
             } catch (Exception e) {
-                logger.log(Level.INFO, HttpResourceServlet.class.getSimpleName() + " update FileEntry(" + file + ") erroneous", e);
+                this.servlet.logger.log(Level.INFO, HttpResourceServlet.class.getSimpleName() + " update FileEntry(" + file + ") erroneous", e);
             }
         }
 
-        @Override
-        protected void finalize() throws Throwable {
+        public void remove() {
             if (this.content != null) this.servlet.cachedLength.add(0L - this.content.remaining());
-            super.finalize();
         }
 
         public long getCachedLength() {

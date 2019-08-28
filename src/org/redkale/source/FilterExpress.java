@@ -6,26 +6,27 @@
 package org.redkale.source;
 
 /**
+ * 函数表达式， 均与SQL定义中的表达式相同
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  */
 public enum FilterExpress {
 
     EQUAL("="),
+    IGNORECASEEQUAL("="),//不区分大小写的 =
     NOTEQUAL("<>"),
+    IGNORECASENOTEQUAL("="),//不区分大小写的 <>
     GREATERTHAN(">"),
     LESSTHAN("<"),
     GREATERTHANOREQUALTO(">="),
     LESSTHANOREQUALTO("<="),
-    
     STARTSWITH("LIKE"),
     NOTSTARTSWITH("NOT LIKE"),
     ENDSWITH("LIKE"),
     NOTENDSWITH("NOT LIKE"),
-    
     LIKE("LIKE"),
     NOTLIKE("NOT LIKE"),
     IGNORECASELIKE("LIKE"), //不区分大小写的 LIKE
@@ -42,6 +43,8 @@ public enum FilterExpress {
     NOTIN("NOT IN"),
     ISNULL("IS NULL"),
     ISNOTNULL("IS NOT NULL"),
+    ISEMPTY("="),//值为空
+    ISNOTEMPTY("<>"), //值不为空
     OPAND("&"), //与运算 > 0
     OPOR("|"), //或运算 > 0
     OPANDNO("&"), //与运算 == 0

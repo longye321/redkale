@@ -5,6 +5,7 @@
  */
 package org.redkale.convert.ext;
 
+import java.util.stream.IntStream;
 import org.redkale.convert.Reader;
 import org.redkale.convert.SimpledCoder;
 import org.redkale.convert.Writer;
@@ -12,7 +13,9 @@ import org.redkale.convert.Writer;
 /**
  * int[] 的SimpledCoder实现
  *
- * <p> 详情见: http://redkale.org
+ * <p>
+ * 详情见: https://redkale.org
+ *
  * @author zhangjx
  * @param <R> Reader输入的子类型
  * @param <W> Writer输出的子类型
@@ -27,24 +30,31 @@ public final class IntArraySimpledCoder<R extends Reader, W extends Writer> exte
             out.writeNull();
             return;
         }
-        out.writeArrayB(values.length);
-        boolean flag = false;
-        for (int v : values) {
-            if (flag) out.writeArrayMark();
-            out.writeInt(v);
-            flag = true;
+        if (out.writeArrayB(values.length, IntSimpledCoder.instance, values) < 0) {
+            boolean flag = false;
+            for (int v : values) {
+                if (flag) out.writeArrayMark();
+                out.writeInt(v);
+                flag = true;
+            }
         }
         out.writeArrayE();
     }
 
     @Override
     public int[] convertFrom(R in) {
-        int len = in.readArrayB();
+        int len = in.readArrayB(null, null, IntSimpledCoder.instance);
+        int contentLength = -1;
         if (len == Reader.SIGN_NULL) return null;
+        if (len == Reader.SIGN_NOLENBUTBYTES) {
+            contentLength = in.readMemberContentLength(null, IntSimpledCoder.instance);
+            len = Reader.SIGN_NOLENGTH;
+        }
         if (len == Reader.SIGN_NOLENGTH) {
             int size = 0;
             int[] data = new int[8];
-            while (in.hasNext()) {
+            int startPosition = in.position();
+            while (in.hasNext(startPosition, contentLength)) {
                 if (size >= data.length) {
                     int[] newdata = new int[data.length + 4];
                     System.arraycopy(data, 0, newdata, 0, size);
@@ -66,4 +76,26 @@ public final class IntArraySimpledCoder<R extends Reader, W extends Writer> exte
         }
     }
 
+    public final static class IntStreamSimpledCoder<R extends Reader, W extends Writer> extends SimpledCoder<R, W, IntStream> {
+
+        public static final IntStreamSimpledCoder instance = new IntStreamSimpledCoder();
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public void convertTo(W out, IntStream values) {
+            if (values == null) {
+                out.writeNull();
+                return;
+            }
+            IntArraySimpledCoder.instance.convertTo(out, values.toArray());
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public IntStream convertFrom(R in) {
+            int[] value = IntArraySimpledCoder.instance.convertFrom(in);
+            return value == null ? null : IntStream.of(value);
+        }
+
+    }
 }

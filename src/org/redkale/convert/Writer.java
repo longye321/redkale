@@ -5,12 +5,13 @@
  */
 package org.redkale.convert;
 
-import org.redkale.util.Attribute;
+import java.lang.reflect.*;
 
 /**
+ * 序列化的数据输出流
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  */
@@ -18,6 +19,33 @@ public abstract class Writer {
 
     //当前对象输出字段名之前是否需要分隔符， JSON字段间的分隔符为,逗号
     protected boolean comma;
+
+    //convertTo时是否以指定Type的ObjectEncoder进行处理
+    protected Type specify;
+
+    /**
+     * 设置specify
+     *
+     * @param value Type
+     */
+    public void specify(Type value) {
+        if (value instanceof GenericArrayType) {
+            this.specify = ((GenericArrayType) value).getGenericComponentType();
+        } else if (value instanceof Class && ((Class) value).isArray()) {
+            this.specify = ((Class) value).getComponentType();
+        } else {
+            this.specify = value;
+        }
+    }
+
+    /**
+     * 返回specify
+     *
+     * @return int
+     */
+    public Type specify() {
+        return this.specify;
+    }
 
     /**
      * 当tiny=true时， 字符串为空、boolean为false的字段值都会被跳过， 不会输出。
@@ -37,7 +65,7 @@ public abstract class Writer {
      * @return boolean
      */
     public abstract boolean needWriteClassName();
-    
+
     /**
      * 写入类名
      *
@@ -50,9 +78,12 @@ public abstract class Writer {
      * 注： 覆盖此方法必须要先调用父方法 super.writeObjectB(obj);
      *
      * @param obj 写入的对象
+     *
+     * @return 返回-1表示还没有写入对象内容，大于-1表示已写入对象内容，返回对象内容大小
      */
-    public void writeObjectB(Object obj) {
+    public int writeObjectB(Object obj) {
         this.comma = false;
+        return -1;
     }
 
     /**
@@ -73,7 +104,7 @@ public abstract class Writer {
      * @param obj    写入的对象
      */
     @SuppressWarnings("unchecked")
-    public final void writeObjectField(final EnMember member, Object obj) {
+    public void writeObjectField(final EnMember member, Object obj) {
         Object value = member.attribute.get(obj);
         if (value == null) return;
         if (tiny()) {
@@ -83,7 +114,7 @@ public abstract class Writer {
                 if (!((Boolean) value)) return;
             }
         }
-        this.writeFieldName(member.attribute);
+        this.writeFieldName(member);
         member.encoder.convertTo(this, value);
         this.comma = true;
     }
@@ -98,9 +129,13 @@ public abstract class Writer {
     /**
      * 输出一个数组前的操作
      *
-     * @param size 数组长度
+     * @param size             数组长度
+     * @param componentEncoder Encodeable
+     * @param obj              对象, 不一定是数组、Collection对象，也可能是伪Collection对象
+     *
+     * @return 返回-1表示还没有写入对象内容，大于-1表示已写入对象内容，返回对象内容大小
      */
-    public abstract void writeArrayB(int size);
+    public abstract int writeArrayB(int size, Encodeable<Writer, Object> componentEncoder, Object obj);
 
     /**
      * 输出数组元素间的间隔符
@@ -117,9 +152,14 @@ public abstract class Writer {
     /**
      * 输出一个Map前的操作
      *
-     * @param size map大小
+     * @param size         map大小
+     * @param keyEncoder   Encodeable
+     * @param valueEncoder Encodeable
+     * @param obj          对象, 不一定是Map对象，也可能是伪Map对象
+     *
+     * @return 返回-1表示还没有写入对象内容，大于-1表示已写入对象内容，返回对象内容大小
      */
-    public abstract void writeMapB(int size);
+    public abstract int writeMapB(int size, Encodeable<Writer, Object> keyEncoder, Encodeable<Writer, Object> valueEncoder, Object obj);
 
     /**
      * 输出一个Map中key与value间的间隔符
@@ -136,9 +176,9 @@ public abstract class Writer {
     /**
      * 输出一个字段名
      *
-     * @param attribute 字段的Attribute对象
+     * @param member 字段的EnMember对象
      */
-    public abstract void writeFieldName(Attribute attribute);
+    public abstract void writeFieldName(EnMember member);
 
     /**
      * 写入一个boolean值
@@ -153,6 +193,13 @@ public abstract class Writer {
      * @param value byte值
      */
     public abstract void writeByte(byte value);
+
+    /**
+     * 写入byte[]
+     *
+     * @param values byte[]
+     */
+    public abstract void writeByteArray(byte[] values);
 
     /**
      * 写入一个char值
@@ -209,4 +256,11 @@ public abstract class Writer {
      * @param value String值
      */
     public abstract void writeString(String value);
+
+    /**
+     * 写入一个StringConvertWrapper值
+     *
+     * @param value StringConvertWrapper值
+     */
+    public abstract void writeWrapper(StringConvertWrapper value);
 }

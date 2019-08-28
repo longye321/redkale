@@ -8,71 +8,111 @@ package org.redkale.convert;
 import java.lang.reflect.*;
 
 /**
- * 对象数组的反序列化，不包含int[]、long[]这样的primitive class数组.
- * 数组长度不能超过 32767。 在BSON中数组长度设定的是short，对于大于32767长度的数组传输会影响性能，所以没有必要采用int存储。
- * 支持一定程度的泛型。
+ * 数组的序列化操作类  <br>
+ * 对象数组的序列化，不包含int[]、long[]这样的primitive class数组。  <br>
+ * 支持一定程度的泛型。  <br>
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  * @param <T> 序列化的数组元素类型
  */
 @SuppressWarnings("unchecked")
-public final class ArrayEncoder<T> implements Encodeable<Writer, T[]> {
+public class ArrayEncoder<T> implements Encodeable<Writer, T[]> {
 
-    private final Type type;
+    protected final Type type;
 
-    private final Type componentType;
+    protected final Type componentType;
 
-    private final Encodeable anyEncoder;
+    protected final Encodeable anyEncoder;
 
-    private final Encodeable<Writer, Object> encoder;
+    protected final Encodeable<Writer, Object> componentEncoder;
+
+    protected volatile boolean inited = false;
+
+    protected final Object lock = new Object();
 
     public ArrayEncoder(final ConvertFactory factory, final Type type) {
         this.type = type;
-        if (type instanceof GenericArrayType) {
-            Type t = ((GenericArrayType) type).getGenericComponentType();
-            this.componentType = t instanceof TypeVariable ? Object.class : t;
-        } else if ((type instanceof Class) && ((Class) type).isArray()) {
-            this.componentType = ((Class) type).getComponentType();
-        } else {
-            throw new ConvertException("(" + type + ") is not a array type");
+        try {
+            if (type instanceof GenericArrayType) {
+                Type t = ((GenericArrayType) type).getGenericComponentType();
+                this.componentType = t instanceof TypeVariable ? Object.class : t;
+            } else if ((type instanceof Class) && ((Class) type).isArray()) {
+                this.componentType = ((Class) type).getComponentType();
+            } else {
+                throw new ConvertException("(" + type + ") is not a array type");
+            }
+            factory.register(type, this);
+            this.componentEncoder = factory.loadEncoder(this.componentType);
+            this.anyEncoder = factory.getAnyEncoder();
+        } finally {
+            inited = true;
+            synchronized (lock) {
+                lock.notifyAll();
+            }
         }
-        factory.register(type, this);
-        this.encoder = factory.loadEncoder(this.componentType);
-        this.anyEncoder = factory.getAnyEncoder();
     }
 
     @Override
     public void convertTo(Writer out, T[] value) {
+        convertTo(out, null, value);
+    }
+
+    public void convertTo(Writer out, EnMember member, T[] value) {
         if (value == null) {
             out.writeNull();
             return;
         }
         if (value.length == 0) {
-            out.writeArrayB(0);
+            out.writeArrayB(0, componentEncoder, value);
             out.writeArrayE();
             return;
         }
-        out.writeArrayB(value.length);
-        final Type comp = this.componentType;
-        boolean first = true;
-        for (Object v : value) {
-            if (!first) out.writeArrayMark();
-            ((v != null && v.getClass() == comp) ? encoder : anyEncoder).convertTo(out, v);
-            if (first) first = false;
+        if (this.componentEncoder == null) {
+            if (!this.inited) {
+                synchronized (lock) {
+                    try {
+                        lock.wait();
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                }
+            }
+        }
+        if (out.writeArrayB(value.length, componentEncoder, value) < 0) {
+            final Type comp = this.componentType;
+            boolean first = true;
+            for (Object v : value) {
+                if (!first) out.writeArrayMark();
+                writeMemberValue(out, member, ((v != null && (v.getClass() == comp || out.specify() == comp)) ? componentEncoder : anyEncoder), v, first);
+                if (first) first = false;
+            }
         }
         out.writeArrayE();
     }
 
+    protected void writeMemberValue(Writer out, EnMember member, Encodeable<Writer, Object> encoder, Object value, boolean first) {
+        encoder.convertTo(out, value);
+    }
+
     @Override
     public String toString() {
-        return this.getClass().getSimpleName() + "{componentType:" + this.componentType + ", encoder:" + this.encoder + "}";
+        return this.getClass().getSimpleName() + "{componentType:" + this.componentType + ", encoder:" + this.componentEncoder + "}";
     }
 
     @Override
     public Type getType() {
         return type;
     }
+
+    public Type getComponentType() {
+        return componentType;
+    }
+
+    public Encodeable<Writer, Object> getComponentEncoder() {
+        return componentEncoder;
+    }
+
 }

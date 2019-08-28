@@ -8,9 +8,10 @@ package org.redkale.convert;
 import java.lang.reflect.Type;
 
 /**
+ * 序列化操作类
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  * @param <W> Writer输出的子类

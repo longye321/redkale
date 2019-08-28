@@ -11,35 +11,39 @@ import org.redkale.source.*;
 import org.redkale.util.*;
 
 /**
+ * 实现进程间DataSource的缓存数据同步
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  */
 @AutoLoad(false)
-@ResourceType({DataCacheListenerService.class, DataCacheListener.class})
+@ResourceType(DataCacheListener.class)
 public class DataCacheListenerService implements DataCacheListener, Service {
 
     @Resource(name = "$")
     private DataSource source;
 
     @Override
-    @MultiRun(selfrun = false, async = true)
-    public <T> void insertCache(Class<T> clazz, T... entitys) {
-        ((DataDefaultSource) source).insertCache(clazz, entitys);
+    @RpcMultiRun(selfrun = false, async = true)
+    public <T> int insertCache(Class<T> clazz, T... entitys) {
+        if (!(source instanceof DataCacheListener)) return -2;
+        return ((DataCacheListener) source).insertCache(clazz, entitys);
     }
 
     @Override
-    @MultiRun(selfrun = false, async = true)
-    public <T> void updateCache(Class<T> clazz, T... entitys) {
-        ((DataDefaultSource) source).updateCache(clazz, entitys);
+    @RpcMultiRun(selfrun = false, async = true)
+    public <T> int updateCache(Class<T> clazz, T... entitys) {
+        if (!(source instanceof DataCacheListener)) return -2;
+        return ((DataCacheListener) source).updateCache(clazz, entitys);
     }
 
     @Override
-    @MultiRun(selfrun = false, async = true)
-    public <T> void deleteCache(Class<T> clazz, Serializable... ids) {
-        ((DataDefaultSource) source).deleteCache(clazz, ids);
+    @RpcMultiRun(selfrun = false, async = true)
+    public <T> int deleteCache(Class<T> clazz, Serializable... ids) {
+        if (!(source instanceof DataCacheListener)) return -2;
+        return ((DataCacheListener) source).deleteCache(clazz, ids);
     }
 
 }

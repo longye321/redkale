@@ -13,7 +13,7 @@ import org.redkale.convert.Writer;
  * 枚举 的SimpledCoder实现
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  * @param <R> Reader输入的子类型
@@ -45,4 +45,8 @@ public final class EnumSimpledCoder<R extends Reader, W extends Writer, E extend
         return (E) Enum.valueOf(type, value);
     }
 
+    @Override
+    public Class<E> getType() {
+        return type;
+    }
 }

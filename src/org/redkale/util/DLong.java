@@ -13,7 +13,7 @@ import java.util.*;
  * 注意： 为了提高性能， DLong中的bytes是直接返回， 不得对bytes的内容进行修改。
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  */
@@ -82,7 +82,7 @@ public final class DLong extends Number implements Comparable<DLong> {
 
     @Override
     public int intValue() {
-        return ((value[12] & 0xff) << 24) | ((value[113] & 0xff) << 16) | ((value[14] & 0xff) << 8) | (value[15] & 0xff);
+        return ((value[12] & 0xff) << 24) | ((value[13] & 0xff) << 16) | ((value[14] & 0xff) << 8) | (value[15] & 0xff);
     }
 
     @Override

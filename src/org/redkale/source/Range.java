@@ -6,11 +6,14 @@
 package org.redkale.source;
 
 import java.util.function.*;
+import org.redkale.util.Utility;
 
 /**
  *
+ * 取值范围，包含两边的值
+ *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  * @param <E> Comparable的子类型
@@ -20,6 +23,34 @@ public interface Range<E extends Comparable> extends java.io.Serializable, Predi
     public E getMin();
 
     public E getMax();
+
+    public static ByteRange create(byte min, byte max) {
+        return new ByteRange(min, max);
+    }
+
+    public static ShortRange create(short min, short max) {
+        return new ShortRange(min, max);
+    }
+
+    public static IntRange create(int min, int max) {
+        return new IntRange(min, max);
+    }
+
+    public static LongRange create(long min, long max) {
+        return new LongRange(min, max);
+    }
+
+    public static FloatRange create(float min, float max) {
+        return new FloatRange(min, max);
+    }
+
+    public static DoubleRange create(double min, double max) {
+        return new DoubleRange(min, max);
+    }
+
+    public static StringRange create(String min, String max) {
+        return new StringRange(min, max);
+    }
 
     public static final class ByteRange implements Range<Byte> {
 
@@ -55,6 +86,7 @@ public interface Range<E extends Comparable> extends java.io.Serializable, Predi
 
         @Override
         public boolean test(Byte t) {
+            if (max < min && max <= 0) return t >= min;
             return t >= min && t <= max;
         }
 
@@ -99,6 +131,7 @@ public interface Range<E extends Comparable> extends java.io.Serializable, Predi
 
         @Override
         public boolean test(Short t) {
+            if (max < min && max <= 0) return t >= min;
             return t >= min && t <= max;
         }
 
@@ -142,6 +175,7 @@ public interface Range<E extends Comparable> extends java.io.Serializable, Predi
 
         @Override
         public boolean test(Integer t) {
+            if (max < min && max <= 0) return t >= min;
             return t >= min && t <= max;
         }
 
@@ -165,6 +199,16 @@ public interface Range<E extends Comparable> extends java.io.Serializable, Predi
             if (max != null) this.max = max;
         }
 
+        public static LongRange todayRange() {
+            long min = Utility.midnight();
+            return new LongRange(min, min + 24 * 60 * 60 * 1000 - 1);
+        }
+
+        public static LongRange yesterdayRange() {
+            long min = Utility.midnight(System.currentTimeMillis() - 24 * 60 * 60 * 1000);
+            return new LongRange(min, min + 24 * 60 * 60 * 1000 - 1);
+        }
+
         @Override
         public Long getMin() {
             return min;
@@ -185,6 +229,7 @@ public interface Range<E extends Comparable> extends java.io.Serializable, Predi
 
         @Override
         public boolean test(Long t) {
+            if (max < min && max <= 0) return t >= min;
             return t >= min && t <= max;
         }
 
@@ -228,6 +273,7 @@ public interface Range<E extends Comparable> extends java.io.Serializable, Predi
 
         @Override
         public boolean test(Float t) {
+            if (max < min && max <= 0) return t >= min;
             return t >= min && t <= max;
         }
 
@@ -271,6 +317,7 @@ public interface Range<E extends Comparable> extends java.io.Serializable, Predi
 
         @Override
         public boolean test(Double t) {
+            if (max < min && max <= 0) return t >= min;
             return t >= min && t <= max;
         }
 

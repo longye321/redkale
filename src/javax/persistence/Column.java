@@ -62,6 +62,13 @@ public @interface Column {
     String name() default "";
 
     /**
+     * (Optional) The comment of the column.
+     *
+     * @return String
+     */
+    String comment() default "";
+
+    /**
      * (Optional) Whether the column is a unique key. This is a
      * shortcut for the <code>UniqueConstraint</code> annotation at the table
      * level and is useful for when the unique key constraint
@@ -95,17 +102,6 @@ public @interface Column {
      * @return boolean
      */
     boolean updatable() default true;
-
-    /**
-     * (Optional) The SQL fragment that is used when
-     * generating the DDL for the column.
-     * <p>
-     * Defaults to the generated SQL to create a
-     * column of the inferred type.
-     *
-     * @return String
-     */
-    String columnDefinition() default "";
 
     /**
      * (Optional) The name of the table that contains the column.

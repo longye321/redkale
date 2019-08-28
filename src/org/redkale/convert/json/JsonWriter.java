@@ -6,15 +6,14 @@
 package org.redkale.convert.json;
 
 import java.nio.ByteBuffer;
-import org.redkale.convert.Writer;
+import org.redkale.convert.*;
 import org.redkale.util.*;
 
 /**
  *
  * writeTo系列的方法输出的字符不能含特殊字符
  * <p>
- * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  */
@@ -60,6 +59,7 @@ public class JsonWriter extends Writer {
      * 返回指定至少指定长度的缓冲区
      *
      * @param len
+     *
      * @return
      */
     private char[] expand(int len) {
@@ -99,6 +99,7 @@ public class JsonWriter extends Writer {
 
     protected boolean recycle() {
         this.count = 0;
+        this.specify = null;
         if (this.content.length > defaultSize) {
             this.content = new char[defaultSize];
         }
@@ -107,6 +108,10 @@ public class JsonWriter extends Writer {
 
     public ByteBuffer[] toBuffers() {
         return new ByteBuffer[]{ByteBuffer.wrap(Utility.encodeUTF8(content, 0, count))};
+    }
+
+    public byte[] toBytes() {
+        return Utility.encodeUTF8(content, 0, count);
     }
 
     public int count() {
@@ -152,9 +157,9 @@ public class JsonWriter extends Writer {
     }
 
     @Override
-    public final void writeFieldName(Attribute attribute) {
+    public final void writeFieldName(EnMember member) {
         if (this.comma) writeTo(',');
-        writeTo(true, attribute.field());
+        writeTo(true, member.getAttribute().field());
         writeTo(':');
     }
 
@@ -181,6 +186,22 @@ public class JsonWriter extends Writer {
     @Override
     public final void writeByte(byte value) {
         writeInt(value);
+    }
+
+    @Override
+    public final void writeByteArray(byte[] values) {
+        if (values == null) {
+            writeNull();
+            return;
+        }
+        writeArrayB(values.length, null, values);
+        boolean flag = false;
+        for (byte v : values) {
+            if (flag) writeArrayMark();
+            writeByte(v);
+            flag = true;
+        }
+        writeArrayE();
     }
 
     @Override
@@ -299,6 +320,11 @@ public class JsonWriter extends Writer {
     }
 
     @Override
+    public final void writeWrapper(StringConvertWrapper value) {
+        writeTo(false, String.valueOf(value));
+    }
+
+    @Override
     public final boolean needWriteClassName() {
         return false;
     }
@@ -308,9 +334,10 @@ public class JsonWriter extends Writer {
     }
 
     @Override
-    public final void writeObjectB(Object obj) {
+    public final int writeObjectB(Object obj) {
         super.writeObjectB(obj);
         writeTo('{');
+        return -1;
     }
 
     @Override
@@ -324,8 +351,9 @@ public class JsonWriter extends Writer {
     }
 
     @Override
-    public final void writeArrayB(int size) {
+    public final int writeArrayB(int size, Encodeable<Writer, Object> componentEncoder, Object obj) {
         writeTo('[');
+        return -1;
     }
 
     @Override
@@ -339,8 +367,9 @@ public class JsonWriter extends Writer {
     }
 
     @Override
-    public final void writeMapB(int size) {
+    public final int writeMapB(int size, Encodeable<Writer, Object> keyEncoder, Encodeable<Writer, Object> valueEncoder, Object obj) {
         writeTo('{');
+        return -1;
     }
 
     @Override

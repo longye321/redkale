@@ -8,9 +8,13 @@ package org.redkale.convert.bson;
 import java.nio.*;
 import org.redkale.convert.*;
 import static org.redkale.convert.Reader.SIGN_NULL;
+import org.redkale.convert.ext.ByteSimpledCoder;
 import org.redkale.util.*;
 
 /**
+ * 以ByteBuffer为数据载体的BsonReader
+ *
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  */
@@ -22,7 +26,10 @@ public class BsonByteBufferReader extends BsonReader {
 
     private ByteBuffer currentBuffer;
 
-    protected BsonByteBufferReader(ByteBuffer... buffers) {
+    protected ConvertMask mask;
+
+    protected BsonByteBufferReader(ConvertMask mask, ByteBuffer... buffers) {
+        this.mask = mask;
         this.buffers = buffers;
         if (buffers != null && buffers.length > 0) this.currentBuffer = buffers[currentIndex];
     }
@@ -33,24 +40,47 @@ public class BsonByteBufferReader extends BsonReader {
         this.currentIndex = 0;
         this.currentBuffer = null;
         this.buffers = null;
+        this.mask = null;
         return false;
     }
 
     @Override
     protected byte currentByte() {
-        return currentBuffer.get(currentBuffer.position());
+        return mask == null ? currentBuffer.get(currentBuffer.position()) : mask.unmask(currentBuffer.get(currentBuffer.position()));
+    }
+
+    @Override
+    public int readMapB(DeMember member, byte[] typevals, Decodeable keyDecoder, Decodeable valueDecoder) {
+        short bt = readShort();
+        if (bt == Reader.SIGN_NULL) return bt;
+        short lt = readShort();
+        byte kt = readByte();
+        byte vt = readByte();
+        if (typevals != null) {
+            typevals[0] = kt;
+            typevals[1] = vt;
+        }
+        return (bt & 0xffff) << 16 | (lt & 0xffff);
     }
 
     /**
      * 判断下一个非空白字节是否为[
      *
+     * @param member           DeMember
+     * @param typevals         byte[]
+     * @param componentDecoder Decodeable
+     *
      * @return 数组长度或 SIGN_NULL
      */
     @Override
-    public final int readArrayB() {
+    public final int readArrayB(DeMember member, byte[] typevals, Decodeable componentDecoder) {
         short bt = readShort();
         if (bt == Reader.SIGN_NULL) return bt;
         short lt = readShort();
+        if (componentDecoder != null && componentDecoder != ByteSimpledCoder.instance) {
+            byte comval = readByte();
+            if (typevals != null) typevals[0] = comval;
+        }
         return (bt & 0xffff) << 16 | (lt & 0xffff);
     }
 //------------------------------------------------------------
@@ -64,13 +94,13 @@ public class BsonByteBufferReader extends BsonReader {
     public byte readByte() {
         if (this.currentBuffer.hasRemaining()) {
             this.position++;
-            return this.currentBuffer.get();
+            return mask == null ? this.currentBuffer.get() : mask.unmask(this.currentBuffer.get());
         }
         for (;;) {
             this.currentBuffer = this.buffers[++this.currentIndex];
             if (this.currentBuffer.hasRemaining()) {
                 this.position++;
-                return this.currentBuffer.get();
+                return mask == null ? this.currentBuffer.get() : mask.unmask(this.currentBuffer.get());
             }
         }
     }
@@ -81,7 +111,11 @@ public class BsonByteBufferReader extends BsonReader {
             int remain = this.currentBuffer.remaining();
             if (remain >= 2) {
                 this.position += 2;
-                return this.currentBuffer.getChar();
+                if (mask == null) {
+                    return this.currentBuffer.getChar();
+                } else {
+                    return (char) ((0xff00 & (mask.unmask(this.currentBuffer.get()) << 8)) | (0xff & mask.unmask(this.currentBuffer.get())));
+                }
             }
         }
         return (char) ((0xff00 & (readByte() << 8)) | (0xff & readByte()));
@@ -93,7 +127,11 @@ public class BsonByteBufferReader extends BsonReader {
             int remain = this.currentBuffer.remaining();
             if (remain >= 2) {
                 this.position += 2;
-                return this.currentBuffer.getShort();
+                if (mask == null) {
+                    return this.currentBuffer.getShort();
+                } else {
+                    return (short) ((0xff00 & (mask.unmask(this.currentBuffer.get()) << 8)) | (0xff & mask.unmask(this.currentBuffer.get())));
+                }
             }
         }
         return (short) ((0xff00 & (readByte() << 8)) | (0xff & readByte()));
@@ -105,7 +143,14 @@ public class BsonByteBufferReader extends BsonReader {
             int remain = this.currentBuffer.remaining();
             if (remain >= 4) {
                 this.position += 4;
-                return this.currentBuffer.getInt();
+                if (mask == null) {
+                    return this.currentBuffer.getInt();
+                } else {
+                    return ((mask.unmask(this.currentBuffer.get()) & 0xff) << 24)
+                        | ((mask.unmask(this.currentBuffer.get()) & 0xff) << 16)
+                        | ((mask.unmask(this.currentBuffer.get()) & 0xff) << 8)
+                        | (mask.unmask(this.currentBuffer.get()) & 0xff);
+                }
             }
         }
         return ((readByte() & 0xff) << 24) | ((readByte() & 0xff) << 16) | ((readByte() & 0xff) << 8) | (readByte() & 0xff);
@@ -117,17 +162,28 @@ public class BsonByteBufferReader extends BsonReader {
             int remain = this.currentBuffer.remaining();
             if (remain >= 8) {
                 this.position += 8;
-                return this.currentBuffer.getLong();
+                if (mask == null) {
+                    return this.currentBuffer.getLong();
+                } else {
+                    return ((((long) mask.unmask(this.currentBuffer.get()) & 0xff) << 56)
+                        | (((long) mask.unmask(this.currentBuffer.get()) & 0xff) << 48)
+                        | (((long) mask.unmask(this.currentBuffer.get()) & 0xff) << 40)
+                        | (((long) mask.unmask(this.currentBuffer.get()) & 0xff) << 32)
+                        | (((long) mask.unmask(this.currentBuffer.get()) & 0xff) << 24)
+                        | (((long) mask.unmask(this.currentBuffer.get()) & 0xff) << 16)
+                        | (((long) mask.unmask(this.currentBuffer.get()) & 0xff) << 8)
+                        | (((long) mask.unmask(this.currentBuffer.get()) & 0xff)));
+                }
             }
         }
         return ((((long) readByte() & 0xff) << 56)
-                | (((long) readByte() & 0xff) << 48)
-                | (((long) readByte() & 0xff) << 40)
-                | (((long) readByte() & 0xff) << 32)
-                | (((long) readByte() & 0xff) << 24)
-                | (((long) readByte() & 0xff) << 16)
-                | (((long) readByte() & 0xff) << 8)
-                | (((long) readByte() & 0xff)));
+            | (((long) readByte() & 0xff) << 48)
+            | (((long) readByte() & 0xff) << 40)
+            | (((long) readByte() & 0xff) << 32)
+            | (((long) readByte() & 0xff) << 24)
+            | (((long) readByte() & 0xff) << 16)
+            | (((long) readByte() & 0xff) << 8)
+            | (((long) readByte() & 0xff)));
     }
 
     protected byte[] read(final int len) {
@@ -147,9 +203,19 @@ public class BsonByteBufferReader extends BsonReader {
         if (remain >= len) {
             this.position += len;
             this.currentBuffer.get(bs, pos, len);
+            if (mask != null) {
+                for (int i = pos, end = pos + len; i < end; i++) {
+                    bs[i] = mask.unmask(bs[i]);
+                }
+            }
             return;
         }
         this.currentBuffer.get(bs, pos, remain);
+        if (mask != null) {
+            for (int i = pos, end = pos + remain; i < end; i++) {
+                bs[i] = mask.unmask(bs[i]);
+            }
+        }
         this.position += remain;
         this.currentBuffer = this.buffers[++this.currentIndex];
         read(bs, pos + remain);

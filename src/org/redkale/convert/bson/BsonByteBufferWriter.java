@@ -7,11 +7,13 @@ package org.redkale.convert.bson;
 
 import java.nio.*;
 import java.util.function.*;
+import org.redkale.util.Utility;
 
 /**
+ * 以ByteBuffer为数据载体的BsonWriter
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  */
@@ -78,20 +80,14 @@ public class BsonByteBufferWriter extends BsonWriter {
         if (!buffer.hasRemaining()) {
             buffer.flip();
             buffer = supplier.get();
-            ByteBuffer[] bufs = new ByteBuffer[this.buffers.length + 1];
-            System.arraycopy(this.buffers, 0, bufs, 0, this.buffers.length);
-            bufs[this.buffers.length] = buffer;
-            this.buffers = bufs;
+            this.buffers = Utility.append(this.buffers, buffer);
             this.index++;
         }
         int len = buffer.remaining();
         int size = 0;
         while (len < byteLength) {
             buffer = supplier.get();
-            ByteBuffer[] bufs = new ByteBuffer[this.buffers.length + 1];
-            System.arraycopy(this.buffers, 0, bufs, 0, this.buffers.length);
-            bufs[this.buffers.length] = buffer;
-            this.buffers = bufs;
+            this.buffers = Utility.append(this.buffers, buffer);
             len += buffer.remaining();
             size++;
         }
@@ -136,6 +132,7 @@ public class BsonByteBufferWriter extends BsonWriter {
     @Override
     protected boolean recycle() {
         this.index = 0;
+        this.specify = null;
         this.buffers = null;
         return false;
     }

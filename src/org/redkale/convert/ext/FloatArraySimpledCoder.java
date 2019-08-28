@@ -12,7 +12,9 @@ import org.redkale.convert.Writer;
 /**
  * float[] 的SimpledCoder实现
  *
- * <p> 详情见: http://redkale.org
+ * <p>
+ * 详情见: https://redkale.org
+ *
  * @author zhangjx
  * @param <R> Reader输入的子类型
  * @param <W> Writer输出的子类型
@@ -27,24 +29,31 @@ public final class FloatArraySimpledCoder<R extends Reader, W extends Writer> ex
             out.writeNull();
             return;
         }
-        out.writeArrayB(values.length);
-        boolean flag = false;
-        for (float v : values) {
-            if (flag) out.writeArrayMark();
-            out.writeFloat(v);
-            flag = true;
+        if (out.writeArrayB(values.length, FloatSimpledCoder.instance, values) < 0) {
+            boolean flag = false;
+            for (float v : values) {
+                if (flag) out.writeArrayMark();
+                out.writeFloat(v);
+                flag = true;
+            }
         }
         out.writeArrayE();
     }
 
     @Override
     public float[] convertFrom(R in) {
-        int len = in.readArrayB();
+        int len = in.readArrayB(null, null, FloatSimpledCoder.instance);
+        int contentLength = -1;
         if (len == Reader.SIGN_NULL) return null;
+        if (len == Reader.SIGN_NOLENBUTBYTES) {
+            contentLength = in.readMemberContentLength(null, FloatSimpledCoder.instance);
+            len = Reader.SIGN_NOLENGTH;
+        }
         if (len == Reader.SIGN_NOLENGTH) {
             int size = 0;
             float[] data = new float[8];
-            while (in.hasNext()) {
+            int startPosition = in.position();
+            while (in.hasNext(startPosition, contentLength)) {
                 if (size >= data.length) {
                     float[] newdata = new float[data.length + 4];
                     System.arraycopy(data, 0, newdata, 0, size);

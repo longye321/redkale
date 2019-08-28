@@ -10,12 +10,13 @@ import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.*;
 import static org.redkale.source.FilterExpress.EQUAL;
-import org.redkale.util.Attribute;
+import org.redkale.util.*;
 
 /**
+ * &#64;FilterJoinColumn对应的FilterNode对象
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  */
@@ -82,10 +83,22 @@ public class FilterJoinNode extends FilterNode {
     }
 
     @Override
+    public FilterJoinNode copy() {
+        FilterJoinNode node = (FilterJoinNode) copy(new FilterJoinNode());
+        node.joinClass = this.joinClass;
+        node.joinEntity = this.joinEntity;
+        if (this.joinColumns != null) {
+            node.joinColumns = new String[this.joinColumns.length];
+            System.arraycopy(this.joinColumns, 0, node.joinColumns, 0, this.joinColumns.length);
+        }
+        return node;
+    }
+
+    @Override
     protected FilterNode any(final FilterNode node0, boolean signor) {
         Objects.requireNonNull(node0);
         if (!(node0 instanceof FilterJoinNode)) {
-            throw new IllegalArgumentException(this + (signor ? " or " : " and ") + " a node but " + String.valueOf(node0) + "is not a " + FilterJoinNode.class.getSimpleName());
+            throw new IllegalArgumentException(this + (signor ? " or " : " and ") + " a node but " + String.valueOf(node0) + " is not a " + FilterJoinNode.class.getSimpleName());
         }
         final FilterJoinNode node = (FilterJoinNode) node0;
         if (this.nodes == null) {
@@ -94,14 +107,11 @@ public class FilterJoinNode extends FilterNode {
             return this;
         }
         if (or == signor || this.column == null) {
-            FilterNode[] newsiblings = new FilterNode[nodes.length + 1];
-            System.arraycopy(nodes, 0, newsiblings, 0, nodes.length);
-            newsiblings[nodes.length] = node;
-            this.nodes = newsiblings;
+            this.nodes = Utility.append(this.nodes, node);
             if (this.column == null) this.or = signor;
             return this;
         }
-        this.nodes = new FilterNode[]{new FilterJoinNode(node), node};
+        this.nodes = new FilterNode[]{new FilterJoinNode(this), node};
         this.column = null;
         this.express = null;
         this.itemand = true;
@@ -128,14 +138,23 @@ public class FilterJoinNode extends FilterNode {
         if (filter == null && !more.get()) return rs;
         if (filter != null) {
             final Predicate<E> inner = filter;
+            final String[][] localJoinColumns = new String[joinColumns.length][2];
+            for (int i = 0; i < joinColumns.length; i++) {
+                int pos = joinColumns[i].indexOf('=');
+                if (pos > 0) {
+                    localJoinColumns[i] = new String[]{joinColumns[i].substring(0, pos), joinColumns[i].substring(pos + 1)};
+                } else {
+                    localJoinColumns[i] = new String[]{joinColumns[i], joinColumns[i]};
+                }
+            }
             rs = new Predicate<T>() {
 
                 @Override
                 public boolean test(final T t) {
                     Predicate<E> joinPredicate = null;
-                    for (String joinColumn : joinColumns) {
-                        final Serializable key = cache.getAttribute(joinColumn).get(t);
-                        final Attribute<E, Serializable> joinAttr = joinCache.getAttribute(joinColumn);
+                    for (String[] localJoinColumn : localJoinColumns) {
+                        final Serializable key = cache.getAttribute(localJoinColumn[0]).get(t);
+                        final Attribute<E, Serializable> joinAttr = joinCache.getAttribute(localJoinColumn[1]);
                         Predicate<E> p = (E e) -> key.equals(joinAttr.get(e));
                         joinPredicate = joinPredicate == null ? p : joinPredicate.and(p);
                     }
@@ -145,9 +164,9 @@ public class FilterJoinNode extends FilterNode {
                 @Override
                 public String toString() {
                     StringBuilder sb = new StringBuilder();
-                    sb.append(" #-- ON ").append(joinColumns[0]).append("=").append(joinClass == null ? "null" : joinClass.getSimpleName()).append(".").append(joinColumns[0]);
-                    for (int i = 1; i < joinColumns.length; i++) {
-                        sb.append(" AND ").append(joinColumns[i]).append("=").append(joinClass == null ? "null" : joinClass.getSimpleName()).append(".").append(joinColumns[i]);
+                    sb.append(" #-- ON ").append(localJoinColumns[0][0]).append("=").append(joinClass == null ? "null" : joinClass.getSimpleName()).append(".").append(localJoinColumns[0][1]);
+                    for (int i = 1; i < localJoinColumns.length; i++) {
+                        sb.append(" AND ").append(localJoinColumns[i][0]).append("=").append(joinClass == null ? "null" : joinClass.getSimpleName()).append(".").append(localJoinColumns[i][1]);
                     }
                     sb.append(" --# ").append(inner.toString());
                     return sb.toString();
@@ -234,7 +253,7 @@ public class FilterJoinNode extends FilterNode {
     }
 
     @Override
-    protected <T> CharSequence createSQLJoin(final Function<Class, EntityInfo> func, final Map<Class, String> joinTabalis, final EntityInfo<T> info) {
+    protected <T> CharSequence createSQLJoin(final Function<Class, EntityInfo> func, final boolean update, final Map<Class, String> joinTabalis, final Set<String> haset, final EntityInfo<T> info) {
         boolean morejoin = false;
         if (this.joinEntity == null) {
             if (this.joinClass != null) this.joinEntity = func.apply(this.joinClass);
@@ -252,7 +271,8 @@ public class FilterJoinNode extends FilterNode {
         }
         StringBuilder sb = new StringBuilder();
         if (this.joinClass != null) {
-            sb.append(createElementSQLJoin(joinTabalis, info, this));
+            CharSequence cs = createElementSQLJoin(update, joinTabalis, haset, info, this);
+            if (cs != null) sb.append(cs);
         }
         if (morejoin) {
             Set<Class> set = new HashSet<>();
@@ -261,7 +281,7 @@ public class FilterJoinNode extends FilterNode {
                 if (node instanceof FilterJoinNode) {
                     FilterJoinNode joinNode = ((FilterJoinNode) node);
                     if (!set.contains(joinNode.joinClass)) {
-                        CharSequence cs = createElementSQLJoin(joinTabalis, info, joinNode);
+                        CharSequence cs = createElementSQLJoin(update, joinTabalis, haset, info, joinNode);
                         if (cs != null) {
                             sb.append(cs);
                             set.add(joinNode.joinClass);
@@ -273,15 +293,28 @@ public class FilterJoinNode extends FilterNode {
         return sb;
     }
 
-    private static CharSequence createElementSQLJoin(final Map<Class, String> joinTabalis, final EntityInfo info, final FilterJoinNode node) {
-        if (node.joinClass == null) return null;
+    private static CharSequence createElementSQLJoin(final boolean update, final Map<Class, String> joinTabalis, final Set<String> haset, final EntityInfo info, final FilterJoinNode node) {
+        if (node.joinClass == null || (haset != null && haset.contains(joinTabalis.get(node.joinClass)))) return null;
         StringBuilder sb = new StringBuilder();
         String[] joinColumns = node.joinColumns;
-        sb.append(" INNER JOIN ").append(node.joinEntity.getTable()).append(" ").append(joinTabalis.get(node.joinClass))
-            .append(" ON ").append(info.getSQLColumn("a", joinColumns[0])).append(" = ").append(node.joinEntity.getSQLColumn(joinTabalis.get(node.joinClass), joinColumns[0]));
-        for (int i = 1; i < joinColumns.length; i++) {
-            sb.append(" AND ").append(info.getSQLColumn("a", joinColumns[i])).append(" = ").append(node.joinEntity.getSQLColumn(joinTabalis.get(node.joinClass), joinColumns[i]));
+        int pos = joinColumns[0].indexOf('=');
+        if (update) {
+            sb.append("[").append(node.joinEntity.getTable(node)).append(" ").append(joinTabalis.get(node.joinClass)).append(']');
+            sb.append('{').append(info.getSQLColumn("a", pos > 0 ? joinColumns[0].substring(0, pos) : joinColumns[0])).append(" = ").append(node.joinEntity.getSQLColumn(joinTabalis.get(node.joinClass), pos > 0 ? joinColumns[0].substring(pos + 1) : joinColumns[0]));
+            for (int i = 1; i < joinColumns.length; i++) {
+                pos = joinColumns[i].indexOf('=');
+                sb.append(" AND ").append(info.getSQLColumn("a", pos > 0 ? joinColumns[i].substring(0, pos) : joinColumns[i])).append(" = ").append(node.joinEntity.getSQLColumn(joinTabalis.get(node.joinClass), pos > 0 ? joinColumns[i].substring(pos + 1) : joinColumns[i]));
+            }
+            sb.append('}');
+        } else {
+            sb.append(" INNER JOIN ").append(node.joinEntity.getTable(node)).append(" ").append(joinTabalis.get(node.joinClass))
+                .append(" ON ").append(info.getSQLColumn("a", pos > 0 ? joinColumns[0].substring(0, pos) : joinColumns[0])).append(" = ").append(node.joinEntity.getSQLColumn(joinTabalis.get(node.joinClass), pos > 0 ? joinColumns[0].substring(pos + 1) : joinColumns[0]));
+            for (int i = 1; i < joinColumns.length; i++) {
+                pos = joinColumns[i].indexOf('=');
+                sb.append(" AND ").append(info.getSQLColumn("a", pos > 0 ? joinColumns[i].substring(0, pos) : joinColumns[i])).append(" = ").append(node.joinEntity.getSQLColumn(joinTabalis.get(node.joinClass), pos > 0 ? joinColumns[i].substring(pos + 1) : joinColumns[i]));
+            }
         }
+        if (haset != null) haset.add(joinTabalis.get(node.joinClass));
         return sb;
     }
 

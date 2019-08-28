@@ -5,522 +5,311 @@
  */
 package org.redkale.net.http;
 
-import org.redkale.net.AsyncConnection;
-import org.redkale.net.Context;
 import static org.redkale.net.http.WebSocket.*;
 import org.redkale.net.http.WebSocketPacket.FrameType;
 import java.nio.ByteBuffer;
 import java.nio.channels.*;
-import java.security.SecureRandom;
 import java.util.*;
+import java.util.AbstractMap.SimpleEntry;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiConsumer;
 import java.util.logging.*;
+import org.redkale.util.ByteArray;
 
 /**
+ * WebSocket的消息接收发送器, 一个WebSocket对应一个WebSocketRunner
  *
- * <p> 详情见: http://redkale.org
+ * <p>
+ * 详情见: https://redkale.org
+ *
  * @author zhangjx
  */
-public class WebSocketRunner implements Runnable {
+class WebSocketRunner implements Runnable {
 
     private final WebSocketEngine engine;
 
-    private final AsyncConnection channel;
-
     private final WebSocket webSocket;
 
-    protected final Context context;
+    protected final HttpContext context;
 
-    private ByteBuffer readBuffer;
+    protected final boolean mergemsg;
 
-    private ByteBuffer writeBuffer;
+    volatile boolean closed = false;
 
-    protected boolean closed = false;
+    FrameType currSeriesMergeFrameType;
 
-    private AtomicBoolean writing = new AtomicBoolean();
+    ByteArray currSeriesMergeMessage;
 
-    private final Coder coder = new Coder();
+    private final BiConsumer<WebSocket, Object> restMessageConsumer;  //主要供RestWebSocket使用
 
-    private final BlockingQueue<byte[]> queue = new ArrayBlockingQueue(1024);
+    protected long lastSendTime;
 
-    private final boolean wsbinary;
+    protected long lastReadTime;
 
-    public WebSocketRunner(Context context, WebSocket webSocket, AsyncConnection channel, final boolean wsbinary) {
+    WebSocketRunner(HttpContext context, WebSocket webSocket, BiConsumer<WebSocket, Object> messageConsumer) {
         this.context = context;
         this.engine = webSocket._engine;
         this.webSocket = webSocket;
-        this.channel = channel;
-        this.wsbinary = wsbinary;
-        webSocket._runner = this;
-        this.coder.logger = context.getLogger();
-        this.coder.debugable = false;//context.getLogger().isLoggable(Level.FINEST);
-        this.readBuffer = context.pollBuffer();
-        this.writeBuffer = context.pollBuffer();
+        this.mergemsg = webSocket._engine.mergemsg;
+        this.restMessageConsumer = messageConsumer;
     }
 
     @Override
     public void run() {
-        final boolean debug = this.coder.debugable;
+        final boolean debug = context.getLogger().isLoggable(Level.FINEST);
+        final WebSocketRunner self = this;
         try {
             webSocket.onConnected();
-            channel.setReadTimeoutSecond(300); //读取超时5分钟
-            if (channel.isOpen()) {
-                if (wsbinary) {
-                    webSocket.onRead(channel);
-                    return;
-                }
-                channel.read(readBuffer, null, new CompletionHandler<Integer, Void>() {
+            webSocket._channel.setReadTimeoutSeconds(300); //读取超时5分钟
+            if (webSocket._channel.isOpen()) {
+                final int wsmaxbody = webSocket._engine.wsmaxbody;
+                webSocket._channel.read(new CompletionHandler<Integer, ByteBuffer>() {
 
-                    private ByteBuffer recentExBuffer;
+                    //尚未解析完的数据包
+                    private WebSocketPacket unfinishPacket;
 
                     //当接收的数据流长度大于ByteBuffer长度时， 则需要额外的ByteBuffer 辅助;
-                    private final List<ByteBuffer> readBuffers = new ArrayList<>();
+                    private final List<ByteBuffer> exBuffers = new ArrayList<>();
+
+                    private final SimpleEntry<String, byte[]> halfBytes = new SimpleEntry("", null);
 
                     @Override
-                    public void completed(Integer count, Void attachment1) {
-                        if (count < 1 && readBuffers.isEmpty()) {
-                            closeRunner();
-                            if (debug) context.getLogger().log(Level.FINEST, "WebSocketRunner abort on read buffer count, force to close channel, live " + (System.currentTimeMillis() - webSocket.getCreatetime()) / 1000 + " seconds");
+                    public void completed(Integer count, ByteBuffer readBuffer) {
+                        if (count < 1) {
+                            if (debug) context.getLogger().log(Level.FINEST, "WebSocketRunner(userid=" + webSocket.getUserid() + ") abort on read buffer count, force to close channel, live " + (System.currentTimeMillis() - webSocket.getCreatetime()) / 1000 + " seconds");
+                            closeRunner(CLOSECODE_ILLPACKET, "read buffer count is " + count);
                             return;
                         }
-                        if (readBuffer == null) return;
-                        if (!readBuffer.hasRemaining() && (recentExBuffer == null || !recentExBuffer.hasRemaining())) {
-                            final ByteBuffer buffer = context.pollBuffer();
-                            recentExBuffer = buffer;
-                            readBuffers.add(buffer);
-                            channel.read(buffer, null, this);
-                            return;
-                        }
-                        readBuffer.flip();
                         try {
-                            ByteBuffer[] exBuffers = null;
-                            if (!readBuffers.isEmpty()) {
-                                exBuffers = readBuffers.toArray(new ByteBuffer[readBuffers.size()]);
-                                readBuffers.clear();
-                                recentExBuffer = null;
-                                for (ByteBuffer b : exBuffers) {
-                                    b.flip();
+                            lastReadTime = System.currentTimeMillis();
+                            readBuffer.flip();
+
+                            WebSocketPacket onePacket = null;
+                            if (unfinishPacket != null) {
+                                if (unfinishPacket.receiveBody(context.getLogger(), self, webSocket, readBuffer)) { //已经接收完毕
+                                    onePacket = unfinishPacket;
+                                    unfinishPacket = null;
+                                    for (ByteBuffer b : exBuffers) {
+                                        webSocket._channel.offerBuffer(b);
+                                    }
+                                    exBuffers.clear();
+                                } else { //需要继续接收,  此处不能回收readBuffer
+                                    webSocket._channel.read(this);
+                                    return;
                                 }
                             }
-                            WebSocketPacket packet = coder.decode(readBuffer, exBuffers);
-                            if (exBuffers != null) {
-                                for (ByteBuffer b : exBuffers) {
-                                    context.offerBuffer(b);
-                                }
-                            }
-                            if (packet == null) {
-                                failed(null, attachment1);
-                                if (debug) context.getLogger().log(Level.FINEST, "WebSocketRunner abort on decode WebSocketPacket, force to close channel, live " + (System.currentTimeMillis() - webSocket.getCreatetime()) / 1000 + " seconds");
-                                return;
-                            }
-                            if (readBuffer != null) {
-                                readBuffer.clear();
-                                channel.read(readBuffer, null, this);
-                            }
-                            webSocket._group.setRecentWebSocket(webSocket);
+
+                            final List<WebSocketPacket> packets = new ArrayList<>();
+                            if (onePacket != null) packets.add(onePacket);
                             try {
-                                if (packet.type == FrameType.TEXT) {
-                                    webSocket.onMessage(packet.getPayload());
-                                } else if (packet.type == FrameType.BINARY) {
-                                    webSocket.onMessage(packet.getBytes());
-                                } else if (packet.type == FrameType.PONG) {
-                                    webSocket.onPong(packet.getBytes());
-                                } else if (packet.type == FrameType.PING) {
-                                    webSocket.onPing(packet.getBytes());
+                                while (true) {
+                                    WebSocketPacket packet = new WebSocketPacket().decode(context.getLogger(), self, webSocket, wsmaxbody, halfBytes, readBuffer);
+                                    if (packet == WebSocketPacket.NONE) break; //解析完毕但是buffer有多余字节
+                                    if (packet != null && !packet.isReceiveFinished()) {
+                                        unfinishPacket = packet;
+                                        if (readBuffer.hasRemaining()) {
+                                            exBuffers.add(readBuffer);
+                                        }
+                                        break;
+                                    }
+                                    packets.add(packet);
+                                    if (packet == null || !readBuffer.hasRemaining()) break;
                                 }
                             } catch (Exception e) {
-                                context.getLogger().log(Level.INFO, "WebSocket onMessage error (" + packet + ")", e);
+                                context.getLogger().log(Level.SEVERE, "WebSocket parse message error", e);
+                                webSocket.onOccurException(e, null);
                             }
-                        } catch (Throwable t) {
-                            closeRunner();
-                            if (debug) context.getLogger().log(Level.FINEST, "WebSocketRunner abort on read WebSocketPacket, force to close channel, live " + (System.currentTimeMillis() - webSocket.getCreatetime()) / 1000 + " seconds", t);
+                            //继续监听消息
+                            if (readBuffer.hasRemaining()) { //exBuffers缓存了
+                                readBuffer = webSocket._channel.pollReadBuffer();
+                            } else {
+                                readBuffer.clear();
+                            }
+                            if (halfBytes.getValue() != null) {
+                                readBuffer.put(halfBytes.getValue());
+                                halfBytes.setValue(null);
+                            }
+                            webSocket._channel.setReadBuffer(readBuffer);
+                            webSocket._channel.read(this);
+
+                            //消息处理
+                            for (final WebSocketPacket packet : packets) {
+                                if (packet == null) {
+                                    if (debug) context.getLogger().log(Level.FINEST, "WebSocketRunner abort on decode WebSocketPacket, force to close channel, live " + (System.currentTimeMillis() - webSocket.getCreatetime()) / 1000 + " seconds");
+                                    failed(null, readBuffer);
+                                    return;
+                                }
+                                if (packet.receiveMessage == WebSocketPacket.MESSAGE_NIL) continue; //last=false && mergemsg=true 的粘包
+
+                                if (packet.type == FrameType.TEXT) {
+                                    try {
+                                        if (packet.receiveType == WebSocketPacket.MessageType.STRING) {
+                                            webSocket.onMessage((String) packet.receiveMessage, packet.last);
+                                        } else {
+                                            if (restMessageConsumer != null) { //主要供RestWebSocket使用
+                                                restMessageConsumer.accept(webSocket, packet.receiveMessage);
+                                            } else {
+                                                webSocket.onMessage(packet.receiveMessage, packet.last);
+                                            }
+                                        }
+                                    } catch (Throwable e) {
+                                        context.getLogger().log(Level.SEVERE, "WebSocket onTextMessage error (" + packet + ")", e);
+                                    }
+                                } else if (packet.type == FrameType.BINARY) {
+                                    try {
+                                        if (packet.receiveType == WebSocketPacket.MessageType.BYTES) {
+                                            webSocket.onMessage((byte[]) packet.receiveMessage, packet.last);
+                                        } else {
+                                            if (restMessageConsumer != null) { //主要供RestWebSocket使用
+                                                restMessageConsumer.accept(webSocket, packet.receiveMessage);
+                                            } else {
+                                                webSocket.onMessage(packet.receiveMessage, packet.last);
+                                            }
+                                        }
+                                    } catch (Throwable e) {
+                                        context.getLogger().log(Level.SEVERE, "WebSocket onBinaryMessage error (" + packet + ")", e);
+                                    }
+                                } else if (packet.type == FrameType.PING) {
+                                    try {
+                                        webSocket.onPing((byte[]) packet.receiveMessage);
+                                    } catch (Exception e) {
+                                        context.getLogger().log(Level.SEVERE, "WebSocket onPing error (" + packet + ")", e);
+                                    }
+                                } else if (packet.type == FrameType.PONG) {
+                                    try {
+                                        //if (debug) context.getLogger().log(Level.FINEST, "WebSocketRunner onMessage by PONG FrameType : " + packet);
+                                        webSocket.onPong((byte[]) packet.receiveMessage);
+                                    } catch (Exception e) {
+                                        context.getLogger().log(Level.SEVERE, "WebSocket onPong error (" + packet + ")", e);
+                                    }
+                                } else if (packet.type == FrameType.CLOSE) {
+                                    if (debug) context.getLogger().log(Level.FINEST, "WebSocketRunner onMessage by CLOSE FrameType : " + packet);
+                                    closeRunner(CLOSECODE_CLIENTCLOSE, "received CLOSE frame-type message");
+                                    return;
+                                } else {
+                                    context.getLogger().log(Level.WARNING, "WebSocketRunner onMessage by unknown FrameType : " + packet);
+                                    closeRunner(CLOSECODE_ILLPACKET, "received unknown frame-type message");
+                                    return;
+                                }
+                            }
+                        } catch (Exception e) {
+                            context.getLogger().log(Level.WARNING, "WebSocketRunner(userid=" + webSocket.getUserid() + ") onMessage by received error", e);
+                            closeRunner(CLOSECODE_WSEXCEPTION, "websocket-received error");
                         }
                     }
 
                     @Override
-                    public void failed(Throwable exc, Void attachment2) {
-                        closeRunner();
+                    public void failed(Throwable exc, ByteBuffer attachment2) {
                         if (exc != null) {
-                            context.getLogger().log(Level.FINEST, "WebSocketRunner read WebSocketPacket failed, force to close channel, live " + (System.currentTimeMillis() - webSocket.getCreatetime()) / 1000 + " seconds", exc);
+                            if (debug) context.getLogger().log(Level.FINEST, "WebSocketRunner read WebSocketPacket failed, force to close channel, live " + (System.currentTimeMillis() - webSocket.getCreatetime()) / 1000 + " seconds", exc);
+                            closeRunner(CLOSECODE_WSEXCEPTION, "read websocket-packet failed");
+                        } else {
+                            closeRunner(CLOSECODE_WSEXCEPTION, "decode websocket-packet error");
                         }
                     }
                 });
             } else {
-                closeRunner();
-                context.getLogger().log(Level.FINEST, "WebSocketRunner abort by AsyncConnection closed");
+                if (debug) context.getLogger().log(Level.FINEST, "WebSocketRunner abort by AsyncConnection closed");
+                closeRunner(RETCODE_WSOCKET_CLOSED, "webSocket channel is not opened");
             }
-        } catch (Exception e) {
-            closeRunner();
-            context.getLogger().log(Level.FINEST, "WebSocketRunner abort on read bytes from channel, force to close channel, live " + (System.currentTimeMillis() - webSocket.getCreatetime()) / 1000 + " seconds", e);
+        } catch (Throwable e) {
+            if (debug) context.getLogger().log(Level.FINEST, "WebSocketRunner abort on read bytes from channel, force to close channel, live " + (System.currentTimeMillis() - webSocket.getCreatetime()) / 1000 + " seconds", e);
+            closeRunner(CLOSECODE_WSEXCEPTION, "read bytes from channel error");
         }
     }
 
-    public int sendMessage(WebSocketPacket packet) {
-        if (packet == null) return RETCODE_SEND_ILLPACKET;
-        if (closed) return RETCODE_WSOCKET_CLOSED;
-        final boolean debug = this.coder.debugable;
-        //System.out.println("推送消息");
-        final byte[] bytes = coder.encode(packet);
-        if (debug) context.getLogger().log(Level.FINEST, "send web socket message's length = " + bytes.length);
-        if (writing.getAndSet(true)) {
-            queue.add(bytes);
-            return 0;
-        }
-        if (writeBuffer == null) return RETCODE_ILLEGALBUFFER;
-        ByteBuffer sendBuffer = null;
-        if (bytes.length <= writeBuffer.capacity()) {
-            writeBuffer.clear();
-            writeBuffer.put(bytes);
-            writeBuffer.flip();
-            sendBuffer = writeBuffer;
-        } else {
-            sendBuffer = ByteBuffer.wrap(bytes);
-        }
+    public CompletableFuture<Integer> sendMessage(WebSocketPacket packet) {
+        if (packet == null) return CompletableFuture.completedFuture(RETCODE_SEND_ILLPACKET);
+        if (closed) return CompletableFuture.completedFuture(RETCODE_WSOCKET_CLOSED);
+        boolean debug = context.getLogger().isLoggable(Level.FINEST);
+        //System.out.println("推送消息");        
+        final CompletableFuture<Integer> futureResult = new CompletableFuture<>();
         try {
-            channel.write(sendBuffer, sendBuffer, new CompletionHandler<Integer, ByteBuffer>() {
+            ByteBuffer[] buffers = packet.sendBuffers != null ? packet.duplicateSendBuffers() : packet.encode(webSocket._channel.getBufferSupplier(), webSocket._channel.getBufferConsumer(), webSocket._engine.cryptor);
+            //if (debug) context.getLogger().log(Level.FINEST, "wsrunner.sending websocket message:  " + packet);
+
+            this.lastSendTime = System.currentTimeMillis();
+            webSocket._channel.write(buffers, buffers, new CompletionHandler<Integer, ByteBuffer[]>() {
+
+                private CompletableFuture<Integer> future = futureResult;
 
                 @Override
-                public void completed(Integer result, ByteBuffer attachment) {
-                    if (attachment == null || closed) return;
-                    try {
-                        if (attachment.hasRemaining()) {
-                            if (debug) context.getLogger().log(Level.FINEST, "WebSocketRunner write completed reemaining: " + attachment.remaining());
-                            channel.write(attachment, attachment, this);
-                            return;
-                        }
-                        byte[] bs = queue.poll();
-                        if (bs != null && writeBuffer != null) {
-                            ByteBuffer sendBuffer;
-                            if (bs.length <= writeBuffer.capacity()) {
-                                writeBuffer.clear();
-                                writeBuffer.put(bs);
-                                writeBuffer.flip();
-                                sendBuffer = writeBuffer;
-                            } else {
-                                sendBuffer = ByteBuffer.wrap(bs);
+                public void completed(Integer result, ByteBuffer[] attachments) {
+                    if (attachments == null || closed) {
+                        if (future != null) {
+                            future.complete(RETCODE_WSOCKET_CLOSED);
+                            future = null;
+                            if (attachments != null) {
+                                for (ByteBuffer buf : attachments) {
+                                    webSocket._channel.offerBuffer(buf);
+                                }
                             }
-                            channel.write(sendBuffer, sendBuffer, this);
+                        }
+                        return;
+                    }
+                    try {
+                        int index = -1;
+                        for (int i = 0; i < attachments.length; i++) {
+                            if (attachments[i].hasRemaining()) {
+                                index = i;
+                                break;
+                            }
+                        }
+                        if (index >= 0) { //ByteBuffer[]统一回收的可以采用此写法
+                            webSocket._channel.write(attachments, index, attachments.length - index, attachments, this);
                             return;
                         }
-                    } catch (NullPointerException e) {
+                        if (future != null) {
+                            future.complete(0);
+                            future = null;
+                            if (attachments != null) {
+                                for (ByteBuffer buf : attachments) {
+                                    webSocket._channel.offerBuffer(buf);
+                                }
+                            }
+                        }
                     } catch (Exception e) {
-                        closeRunner();
+                        future.complete(RETCODE_SENDEXCEPTION);
+                        closeRunner(RETCODE_SENDEXCEPTION, "websocket send message failed on rewrite");
                         context.getLogger().log(Level.WARNING, "WebSocket sendMessage abort on rewrite, force to close channel, live " + (System.currentTimeMillis() - webSocket.getCreatetime()) / 1000 + " seconds", e);
                     }
-                    writing.set(false);
                 }
 
                 @Override
-                public void failed(Throwable exc, ByteBuffer attachment) {
-                    writing.set(false);
-                    closeRunner();
-                    if (exc != null) {
-                        context.getLogger().log(Level.FINE, "WebSocket sendMessage on CompletionHandler failed, force to close channel, live " + (System.currentTimeMillis() - webSocket.getCreatetime()) / 1000 + " seconds", exc);
+                public void failed(Throwable exc, ByteBuffer[] attachments) {
+                    future.complete(RETCODE_SENDEXCEPTION);
+                    closeRunner(RETCODE_SENDEXCEPTION, "websocket send message failed on CompletionHandler");
+                    if (exc != null && context.getLogger().isLoggable(Level.FINER)) {
+                        context.getLogger().log(Level.FINER, "WebSocket sendMessage on CompletionHandler failed, force to close channel, live " + (System.currentTimeMillis() - webSocket.getCreatetime()) / 1000 + " seconds", exc);
                     }
+
                 }
             });
-            return 0;
         } catch (Exception t) {
-            writing.set(false);
-            closeRunner();
-            context.getLogger().log(Level.FINE, "WebSocket sendMessage abort, force to close channel, live " + (System.currentTimeMillis() - webSocket.getCreatetime()) / 1000 + " seconds", t);
-            return RETCODE_SENDEXCEPTION;
+            futureResult.complete(RETCODE_SENDEXCEPTION);
+            closeRunner(RETCODE_SENDEXCEPTION, "websocket send message failed on channel.write");
+            if (t != null && context.getLogger().isLoggable(Level.FINER)) {
+                context.getLogger().log(Level.FINER, "WebSocket sendMessage abort, force to close channel, live " + (System.currentTimeMillis() - webSocket.getCreatetime()) / 1000 + " seconds", t);
+            }
+
         }
+        return futureResult;
     }
 
-    public void closeRunner() {
-        if (closed) return;
+    public boolean isClosed() {
+        return closed;
+    }
+
+    public CompletableFuture<Void> closeRunner(int code, String reason) {
+        if (closed) return null;
         synchronized (this) {
-            if (closed) return;
+            if (closed) return null;
             closed = true;
-            try {
-                channel.close();
-            } catch (Throwable t) {
-            }
-            context.offerBuffer(readBuffer);
-            context.offerBuffer(writeBuffer);
-            readBuffer = null;
-            writeBuffer = null;
-            engine.remove(webSocket);
-            webSocket.onClose(0, null);
+            CompletableFuture<Void> future = engine.removeLocalThenClose(webSocket);
+            webSocket._channel.dispose();
+            webSocket.onClose(code, reason);
+            return future;
         }
-    }
-
-    private static final class Masker {
-
-        public static final int MASK_SIZE = 4;
-
-        private ByteBuffer buffer;
-
-        private ByteBuffer[] exbuffers;
-
-        private byte[] mask;
-
-        private int index = 0;
-
-        public Masker(ByteBuffer buffer, ByteBuffer... exbuffers) {
-            this.buffer = buffer;
-            this.exbuffers = exbuffers == null || exbuffers.length == 0 ? null : exbuffers;
-        }
-
-        public Masker() {
-            generateMask();
-        }
-
-        public int remaining() {
-            int r = buffer.remaining();
-            if (exbuffers != null) {
-                for (ByteBuffer b : exbuffers) {
-                    r += b.remaining();
-                }
-            }
-            return r;
-        }
-
-        public byte get() {
-            return buffer.get();
-        }
-
-        public byte[] get(final int size) {
-            byte[] bytes = new byte[size];
-            if (buffer.remaining() >= size) {
-                buffer.get(bytes);
-            } else { //必须有 exbuffers
-                int offset = buffer.remaining();
-                buffer.get(bytes, 0, buffer.remaining());
-                for (ByteBuffer b : exbuffers) {
-                    b.get(bytes, offset, b.remaining());
-                    offset += b.remaining();
-                }
-            }
-            return bytes;
-        }
-
-        public byte unmask() {
-            final byte b = get();
-            return mask == null ? b : (byte) (b ^ mask[index++ % MASK_SIZE]);
-        }
-
-        public byte[] unmask(int count) {
-            byte[] bytes = get(count);
-            if (mask != null) {
-                for (int i = 0; i < bytes.length; i++) {
-                    bytes[i] ^= mask[index++ % MASK_SIZE];
-                }
-            }
-
-            return bytes;
-        }
-
-        public void generateMask() {
-            mask = new byte[MASK_SIZE];
-            new SecureRandom().nextBytes(mask);
-        }
-
-        public void mask(byte[] bytes, int location, byte b) {
-            bytes[location] = mask == null ? b : (byte) (b ^ mask[index++ % MASK_SIZE]);
-        }
-
-        public void mask(byte[] target, int location, byte[] bytes) {
-            if (bytes != null && target != null) {
-                for (int i = 0; i < bytes.length; i++) {
-                    target[location + i] = mask == null ? bytes[i] : (byte) (bytes[i] ^ mask[index++ % MASK_SIZE]);
-                }
-            }
-        }
-
-        public byte[] maskAndPrepend(byte[] packet) {
-            byte[] masked = new byte[packet.length + MASK_SIZE];
-            System.arraycopy(getMask(), 0, masked, 0, MASK_SIZE);
-            mask(masked, MASK_SIZE, packet);
-            return masked;
-        }
-
-        public void setBuffer(ByteBuffer buffer) {
-            this.buffer = buffer;
-        }
-
-        public byte[] getMask() {
-            return mask;
-        }
-
-        public void readMask() {
-            mask = get(MASK_SIZE);
-        }
-    }
-
-    private static final class Coder {
-
-        protected byte inFragmentedType;
-
-        protected byte outFragmentedType;
-
-        protected final boolean maskData = false;
-
-        protected boolean processingFragment;
-
-        private boolean debugable;
-
-        private Logger logger;
-
-        /**
-         * 0 1 2 3
-         * 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-         * +-+-+-+-+-------+-+-------------+-------------------------------+
-         * |F|R|R|R| opcode|M| Payload len | Extended payload length |
-         * |I|S|S|S| (4) |A| (7) | (16/64) |
-         * |N|V|V|V| |S| | (if payload len==126/127) |
-         * | |1|2|3| |K| | |
-         * +-+-+-+-+-------+-+-------------+ - - - - - - - - - - - - - - - +
-         * | Extended payload length continued, if payload len == 127 |
-         * + - - - - - - - - - - - - - - - +-------------------------------+
-         * | |Masking-key, if MASK set to 1 |
-         * +-------------------------------+-------------------------------+
-         * | Masking-key (continued) | Payload Data |
-         * +-------------------------------- - - - - - - - - - - - - - - - +
-         * : Payload Data continued :
-         * + - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - +
-         * | Payload Data continued |
-         * +-----------------------------------------------------------------------+
-         *
-         * @param buffer
-         * @param exbuffers
-         * @return
-         */
-        public WebSocketPacket decode(final ByteBuffer buffer, ByteBuffer... exbuffers) {
-            final boolean debug = this.debugable;
-            if (debug) {
-                int remain = buffer.remaining();
-                if (exbuffers != null) {
-                    for (ByteBuffer b : exbuffers) {
-                        remain += b == null ? 0 : b.remaining();
-                    }
-                }
-                logger.log(Level.FINEST, "read web socket message's length = " + remain);
-            }
-            if (buffer.remaining() < 2) return null;
-            byte opcode = buffer.get();
-            final boolean last = (opcode & 0b1000000) != 0;
-            final boolean checkrsv = false;//暂时不校验
-            if (checkrsv && (opcode & 0b01110000) != 0) {
-                if (debug) logger.log(Level.FINE, "rsv1 rsv2 rsv3 must be 0, but not (" + opcode + ")");
-                return null; //rsv1 rsv2 rsv3 must be 0     
-            }
-            //0x00 表示一个后续帧 
-            //0x01 表示一个文本帧 
-            //0x02 表示一个二进制帧 
-            //0x03-07 为以后的非控制帧保留
-            //0x8 表示一个连接关闭
-            //0x9 表示一个ping
-            //0xA 表示一个pong
-            //0x0B-0F 为以后的控制帧保留
-            final boolean control = (opcode & 0x08) == 0x08; //是否控制帧
-            //final boolean continuation = opcode == 0;
-            FrameType type = FrameType.valueOf(opcode & 0xf);
-            if (type == FrameType.CLOSE) {
-                if (debug) logger.log(Level.FINEST, " receive close command from websocket client");
-                return null;
-            }
-            byte lengthCode = buffer.get();
-            final Masker masker = new Masker(buffer, exbuffers);
-            final boolean masked = (lengthCode & 0x80) == 0x80;
-            if (masked) lengthCode ^= 0x80; //mask
-            int length;
-            if (lengthCode <= 125) {
-                length = lengthCode;
-            } else {
-                if (control) {
-                    if (debug) logger.log(Level.FINE, " receive control command from websocket client");
-                    return null;
-                }
-
-                final int lengthBytes = lengthCode == 126 ? 2 : 8;
-                if (buffer.remaining() < lengthBytes) {
-                    if (debug) logger.log(Level.FINE, " read illegal message length from websocket, expect " + lengthBytes + " but " + buffer.remaining());
-                    return null;
-                }
-                length = toInt(masker.unmask(lengthBytes));
-            }
-            if (masked) {
-                if (buffer.remaining() < Masker.MASK_SIZE) {
-                    if (debug) logger.log(Level.FINE, " read illegal masker length from websocket, expect " + Masker.MASK_SIZE + " but " + buffer.remaining());
-                    return null;
-                }
-                masker.readMask();
-            }
-            if (masker.remaining() < length) {
-                if (debug) logger.log(Level.FINE, " read illegal remaining length from websocket, expect " + length + " but " + masker.remaining());
-                return null;
-            }
-            final byte[] data = masker.unmask(length);
-            if (data.length != length) {
-                if (debug) logger.log(Level.FINE, " read illegal unmask length from websocket, expect " + length + " but " + data.length);
-                return null;
-            }
-            return new WebSocketPacket(type, data, last);
-        }
-
-        public byte[] encode(WebSocketPacket frame) {
-            byte opcode = (byte) (frame.type.getValue() | 0x80);
-            final byte[] bytes = frame.getContent();
-            final byte[] lengthBytes = encodeLength(bytes.length);
-
-            int length = 1 + lengthBytes.length + bytes.length + (maskData ? Masker.MASK_SIZE : 0);
-            int payloadStart = 1 + lengthBytes.length + (maskData ? Masker.MASK_SIZE : 0);
-            final byte[] packet = new byte[length];
-            packet[0] = opcode;
-            System.arraycopy(lengthBytes, 0, packet, 1, lengthBytes.length);
-            if (maskData) {
-                Masker masker = new Masker();
-                packet[1] |= 0x80;
-                masker.mask(packet, payloadStart, bytes);
-                System.arraycopy(masker.getMask(), 0, packet, payloadStart - Masker.MASK_SIZE, Masker.MASK_SIZE);
-            } else {
-                System.arraycopy(bytes, 0, packet, payloadStart, bytes.length);
-            }
-            return packet;
-        }
-
-        private static byte[] encodeLength(final int length) {
-            byte[] lengthBytes;
-            if (length <= 125) {
-                lengthBytes = new byte[1];
-                lengthBytes[0] = (byte) length;
-            } else {
-                byte[] b = toArray(length);
-                if (length <= 0xFFFF) {
-                    lengthBytes = new byte[3];
-                    lengthBytes[0] = 126;
-                    System.arraycopy(b, 6, lengthBytes, 1, 2);
-                } else {
-                    lengthBytes = new byte[9];
-                    lengthBytes[0] = 127;
-                    System.arraycopy(b, 0, lengthBytes, 1, 8);
-                }
-            }
-            return lengthBytes;
-        }
-
-        private static byte[] toArray(long length) {
-            long value = length;
-            byte[] b = new byte[8];
-            for (int i = 7; i >= 0 && value > 0; i--) {
-                b[i] = (byte) (value & 0xFF);
-                value >>= 8;
-            }
-            return b;
-        }
-
-        private static int toInt(byte[] bytes) {
-            int value = 0;
-            for (int i = 0; i < bytes.length; i++) {
-                value <<= 8;
-                value ^= (int) bytes[i] & 0xFF;
-            }
-            return value;
-        }
-
     }
 
 }

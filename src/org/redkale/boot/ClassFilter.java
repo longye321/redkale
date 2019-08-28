@@ -7,22 +7,21 @@ package org.redkale.boot;
 
 import java.io.*;
 import java.lang.annotation.*;
-import java.lang.reflect.*;
+import java.lang.reflect.Modifier;
 import java.net.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.function.Predicate;
 import java.util.jar.*;
 import java.util.logging.*;
 import java.util.regex.*;
-import org.redkale.util.AnyValue;
+import org.redkale.util.*;
 import org.redkale.util.AnyValue.DefaultAnyValue;
-import org.redkale.util.AutoLoad;
 
 /**
  * class过滤器， 符合条件的class会保留下来存入FilterEntry。
- *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  * @param <T> 泛型
@@ -30,32 +29,59 @@ import org.redkale.util.AutoLoad;
 @SuppressWarnings("unchecked")
 public final class ClassFilter<T> {
 
-    private final Set<FilterEntry<T>> entrys = new HashSet<>();
+    private static final Logger logger = Logger.getLogger(ClassFilter.class.getName()); //日志对象
 
-    private boolean refused;
+    private static final boolean finest = logger.isLoggable(Level.FINEST); //日志级别
 
-    private Class superClass;
+    private final Set<FilterEntry<T>> entrys = new HashSet<>(); //符合条件的结果
 
-    private Class<? extends Annotation> annotationClass;
+    private final Set<FilterEntry<T>> expectEntrys = new HashSet<>(); //准备符合条件的结果
 
-    private Pattern[] includePatterns;
+    private Predicate<String> expectPredicate;
 
-    private Pattern[] excludePatterns;
+    private boolean refused; //是否拒绝所有数据,设置true，则其他规则失效,都是拒绝.
 
-    private List<ClassFilter> ors;
+    private Class superClass; //符合的父类型。不为空时，扫描结果的class必须是superClass的子类
 
-    private List<ClassFilter> ands;
+    private Class[] excludeSuperClasses; //不符合的父类型。
 
-    private AnyValue conf;
+    private Class<? extends Annotation> annotationClass;//符合的注解。不为空时，扫描结果的class必须包含该注解
 
-    public ClassFilter(Class<? extends Annotation> annotationClass, Class superClass) {
-        this(annotationClass, superClass, null);
+    private Pattern[] includePatterns; //符合的classname正则表达式
+
+    private Pattern[] excludePatterns;//拒绝的classname正则表达式
+
+    private Set<String> privilegeIncludes; //特批符合条件的classname
+
+    private Set<String> privilegeExcludes;//特批拒绝条件的classname
+
+    private List<ClassFilter> ors; //或关系的其他ClassFilter
+
+    private List<ClassFilter> ands;//与关系的其他ClassFilter
+
+    private AnyValue conf; //基本配置信息, 当符合条件时将conf的属性赋值到FilterEntry中去。
+
+    private final ClassLoader classLoader;
+
+    public ClassFilter(ClassLoader classLoader, Class<? extends Annotation> annotationClass, Class superClass, Class[] excludeSuperClasses) {
+        this(classLoader, annotationClass, superClass, excludeSuperClasses, null);
     }
 
-    public ClassFilter(Class<? extends Annotation> annotationClass, Class superClass, AnyValue conf) {
+    public ClassFilter(ClassLoader classLoader, Class<? extends Annotation> annotationClass, Class superClass, Class[] excludeSuperClasses, AnyValue conf) {
         this.annotationClass = annotationClass;
         this.superClass = superClass;
+        this.excludeSuperClasses = excludeSuperClasses;
         this.conf = conf;
+        this.classLoader = classLoader == null ? Thread.currentThread().getContextClassLoader() : classLoader;
+    }
+
+    public static ClassFilter create(Class[] excludeSuperClasses, String includeregs, String excluderegs, Set<String> includeValues, Set<String> excludeValues) {
+        ClassFilter filter = new ClassFilter(null, null, null, excludeSuperClasses);
+        filter.setIncludePatterns(includeregs == null ? null : includeregs.split(";"));
+        filter.setExcludePatterns(excluderegs == null ? null : excluderegs.split(";"));
+        filter.setPrivilegeIncludes(includeValues);
+        filter.setPrivilegeExcludes(excludeValues);
+        return filter;
     }
 
     public ClassFilter<T> or(ClassFilter<T> filter) {
@@ -76,28 +102,70 @@ public final class ClassFilter<T> {
      * @return Set&lt;FilterEntry&lt;T&gt;&gt;
      */
     public final Set<FilterEntry<T>> getFilterEntrys() {
-        return entrys;
+        HashSet<FilterEntry<T>> set = new HashSet<>();
+        set.addAll(entrys);
+        if (ors != null) ors.forEach(f -> set.addAll(f.getFilterEntrys()));
+        if (ands != null) ands.forEach(f -> set.addAll(f.getFilterEntrys()));
+        return set;
+    }
+
+    /**
+     * 获取预留的class集合
+     *
+     * @return Set&lt;FilterEntry&lt;T&gt;&gt;
+     */
+    public final Set<FilterEntry<T>> getFilterExpectEntrys() {
+        HashSet<FilterEntry<T>> set = new HashSet<>();
+        set.addAll(expectEntrys);
+        if (ors != null) ors.forEach(f -> set.addAll(f.getFilterExpectEntrys()));
+        if (ands != null) ands.forEach(f -> set.addAll(f.getFilterExpectEntrys()));
+        return set;
+    }
+
+    /**
+     * 获取所有的class集合
+     *
+     * @return Set&lt;FilterEntry&lt;T&gt;&gt;
+     */
+    public final Set<FilterEntry<T>> getAllFilterEntrys() {
+        HashSet<FilterEntry<T>> rs = new HashSet<>();
+        rs.addAll(getFilterEntrys());
+        rs.addAll(getFilterExpectEntrys());
+        return rs;
     }
 
     /**
      * 自动扫描地过滤指定的class
      *
-     * @param property AnyValue
+     * @param property  AnyValue
      * @param clazzname String
+     * @param url       URL
      */
     @SuppressWarnings("unchecked")
-    public final void filter(AnyValue property, String clazzname) {
-        filter(property, clazzname, true);
+    public final void filter(AnyValue property, String clazzname, URL url) {
+        filter(property, clazzname, true, url);
     }
 
     /**
      * 过滤指定的class
      *
-     * @param property application.xml中对应class节点下的property属性项
+     * @param property  application.xml中对应class节点下的property属性项
      * @param clazzname class名称
-     * @param autoscan 为true表示自动扫描的， false表示显著调用filter， AutoLoad的注解将被忽略
+     * @param autoscan  为true表示自动扫描的， false表示显著调用filter， AutoLoad的注解将被忽略
      */
     public final void filter(AnyValue property, String clazzname, boolean autoscan) {
+        filter(property, clazzname, autoscan, null);
+    }
+
+    /**
+     * 过滤指定的class
+     *
+     * @param property  application.xml中对应class节点下的property属性项
+     * @param clazzname class名称
+     * @param autoscan  为true表示自动扫描的， false表示显著调用filter， AutoLoad的注解将被忽略
+     * @param url       URL
+     */
+    public final void filter(AnyValue property, String clazzname, boolean autoscan, URL url) {
         boolean r = accept0(property, clazzname);
         ClassFilter cf = r ? this : null;
         if (r && ands != null) {
@@ -113,9 +181,9 @@ public final class ClassFilter<T> {
                 }
             }
         }
-        if (cf == null) return;
+        if (cf == null || clazzname.startsWith("sun.") || clazzname.contains("module-info")) return;
         try {
-            Class clazz = Class.forName(clazzname);
+            Class clazz = classLoader.loadClass(clazzname);
             if (!cf.accept(property, clazz, autoscan)) return;
             if (cf.conf != null) {
                 if (property == null) {
@@ -129,31 +197,39 @@ public final class ClassFilter<T> {
                     property = dav;
                 }
             }
-            entrys.add(new FilterEntry(clazz, autoscan, property));
-        } catch (Throwable cfe) {
-        }
-    }
 
-    private static Pattern[] toPattern(String[] regs) {
-        if (regs == null) return null;
-        int i = 0;
-        Pattern[] rs = new Pattern[regs.length];
-        for (String reg : regs) {
-            if (reg == null || reg.trim().isEmpty()) continue;
-            rs[i++] = Pattern.compile(reg.trim());
+            AutoLoad auto = (AutoLoad) clazz.getAnnotation(AutoLoad.class);
+            if ((expectPredicate != null && expectPredicate.test(clazzname)) || (autoscan && auto != null && !auto.value())) { //自动扫描且被标记为@AutoLoad(false)的
+                expectEntrys.add(new FilterEntry(clazz, autoscan, true, property));
+            } else {
+                entrys.add(new FilterEntry(clazz, autoscan, false, property));
+            }
+        } catch (Throwable cfe) {
+            if (finest && !clazzname.startsWith("sun.") && !clazzname.startsWith("javax.")
+                && !clazzname.startsWith("com.sun.") && !clazzname.startsWith("jdk.") && !clazzname.startsWith("META-INF")
+                && (!(cfe instanceof NoClassDefFoundError) || (cfe instanceof UnsupportedClassVersionError) || ((NoClassDefFoundError) cfe).getMessage().startsWith("java.lang.NoClassDefFoundError: java"))) {
+                logger.log(Level.FINEST, ClassFilter.class.getSimpleName() + " filter error for class: " + clazzname + (url == null ? "" : (" in " + url)), cfe);
+            }
         }
-        if (i == 0) return null;
-        if (i == rs.length) return rs;
-        Pattern[] ps = new Pattern[i];
-        System.arraycopy(rs, 0, ps, 0, i);
-        return ps;
     }
 
     /**
      * 判断class是否有效
      *
-     * @param property AnyValue
      * @param classname String
+     *
+     * @return boolean
+     */
+    public boolean accept(String classname) {
+        return accept(null, classname);
+    }
+
+    /**
+     * 判断class是否有效
+     *
+     * @param property  AnyValue
+     * @param classname String
+     *
      * @return boolean
      */
     public boolean accept(AnyValue property, String classname) {
@@ -173,6 +249,8 @@ public final class ClassFilter<T> {
 
     private boolean accept0(AnyValue property, String classname) {
         if (this.refused) return false;
+        if (this.privilegeIncludes != null && this.privilegeIncludes.contains(classname)) return true;
+        if (this.privilegeExcludes != null && this.privilegeExcludes.contains(classname)) return false;
         if (classname.startsWith("java.") || classname.startsWith("javax.")) return false;
         if (excludePatterns != null) {
             for (Pattern reg : excludePatterns) {
@@ -191,23 +269,53 @@ public final class ClassFilter<T> {
      * 判断class是否有效
      *
      * @param property AnyValue
-     * @param clazz Class
+     * @param clazz    Class
      * @param autoscan boolean
+     *
      * @return boolean
      */
     @SuppressWarnings("unchecked")
     public boolean accept(AnyValue property, Class clazz, boolean autoscan) {
         if (this.refused || !Modifier.isPublic(clazz.getModifiers())) return false;
-        if (autoscan) {
-            AutoLoad auto = (AutoLoad) clazz.getAnnotation(AutoLoad.class);
-            if (auto != null && !auto.value()) return false;
-        }
         if (annotationClass != null && clazz.getAnnotation(annotationClass) == null) return false;
-        return superClass == null || (clazz != superClass && superClass.isAssignableFrom(clazz));
+        boolean rs = superClass == null || (clazz != superClass && superClass.isAssignableFrom(clazz));
+        if (rs && this.excludeSuperClasses != null && this.excludeSuperClasses.length > 0) {
+            for (Class c : this.excludeSuperClasses) {
+                if (c != null && (clazz == c || c.isAssignableFrom(clazz))) return false;
+            }
+        }
+        return rs;
+    }
+
+    public static Pattern[] toPattern(String[] regs) {
+        if (regs == null || regs.length == 0) return null;
+        int i = 0;
+        Pattern[] rs = new Pattern[regs.length];
+        for (String reg : regs) {
+            if (reg == null || reg.trim().isEmpty()) continue;
+            rs[i++] = Pattern.compile(reg.trim());
+        }
+        if (i == 0) return null;
+        if (i == rs.length) return rs;
+        Pattern[] ps = new Pattern[i];
+        System.arraycopy(rs, 0, ps, 0, i);
+        return ps;
     }
 
     public void setSuperClass(Class superClass) {
         this.superClass = superClass;
+    }
+
+    public Class getSuperClass() {
+        return superClass;
+    }
+
+    public Class[] getExcludeSuperClasses() {
+        return excludeSuperClasses;
+    }
+
+    public void setExcludeSuperClasses(Class[] excludeSuperClasses) {
+        this.excludeSuperClasses = excludeSuperClasses;
     }
 
     public void setAnnotationClass(Class<? extends Annotation> annotationClass) {
@@ -234,16 +342,37 @@ public final class ClassFilter<T> {
         return annotationClass;
     }
 
-    public Class getSuperClass() {
-        return superClass;
-    }
-
     public boolean isRefused() {
         return refused;
     }
 
     public void setRefused(boolean refused) {
         this.refused = refused;
+    }
+
+    public Predicate<String> getExpectPredicate() {
+        return expectPredicate;
+    }
+
+    public void setExpectPredicate(Predicate<String> predicate) {
+        this.expectPredicate = predicate;
+    }
+
+    public Set<String> getPrivilegeIncludes() {
+        return privilegeIncludes;
+    }
+
+    public void setPrivilegeIncludes(Set<String> privilegeIncludes) {
+        this.privilegeIncludes = privilegeIncludes == null || privilegeIncludes.isEmpty() ? null : privilegeIncludes;
+    }
+
+    public Set<String> getPrivilegeExcludes() {
+        return privilegeExcludes;
+    }
+
+    public void setPrivilegeExcludes(Set<String> privilegeExcludes) {
+        this.privilegeExcludes = privilegeExcludes == null || privilegeExcludes.isEmpty() ? null : privilegeExcludes;
+
     }
 
     /**
@@ -263,11 +392,13 @@ public final class ClassFilter<T> {
 
         private final boolean autoload;
 
+        private final boolean expect;
+
         public FilterEntry(Class<T> type, AnyValue property) {
-            this(type, false, property);
+            this(type, false, false, property);
         }
 
-        public FilterEntry(Class<T> type, final boolean autoload, AnyValue property) {
+        public FilterEntry(Class<T> type, final boolean autoload, boolean expect, AnyValue property) {
             this.type = type;
             String str = property == null ? null : property.getValue("groups");
             if (str != null) {
@@ -277,6 +408,7 @@ public final class ClassFilter<T> {
             if (str != null) groups.addAll(Arrays.asList(str.split(";")));
             this.property = property;
             this.autoload = autoload;
+            this.expect = expect;
             this.name = property == null ? "" : property.getValue("name", "");
         }
 
@@ -322,6 +454,9 @@ public final class ClassFilter<T> {
             return autoload;
         }
 
+        public boolean isExpect() {
+            return expect;
+        }
     }
 
     /**
@@ -340,17 +475,30 @@ public final class ClassFilter<T> {
         /**
          * 加载当前线程的classpath扫描所有class进行过滤
          *
-         * @param exclude 不需要扫描的文件夹， 可以为null
-         * @param filters 过滤器
+         * @param excludeFile 不需要扫描的文件夹， 可以为null
+         * @param excludeRegs 包含此关键字的文件将被跳过， 可以为null
+         * @param filters     过滤器
+         *
          * @throws IOException 异常
          */
-        public static void load(final File exclude, final ClassFilter... filters) throws IOException {
-            URLClassLoader loader = (URLClassLoader) Thread.currentThread().getContextClassLoader();
+        public static void load(final File excludeFile, final String[] excludeRegs, final ClassFilter... filters) throws IOException {
+            RedkaleClassLoader loader = (RedkaleClassLoader) Thread.currentThread().getContextClassLoader();
             List<URL> urlfiles = new ArrayList<>(2);
             List<URL> urljares = new ArrayList<>(2);
-            final URL exurl = exclude != null ? exclude.toURI().toURL() : null;
-            for (URL url : loader.getURLs()) {
+            final URL exurl = excludeFile != null ? excludeFile.toURI().toURL() : null;
+            final Pattern[] excludePatterns = toPattern(excludeRegs);
+            for (URL url : loader.getAllURLs()) {
                 if (exurl != null && exurl.sameFile(url)) continue;
+                if (excludePatterns != null) {
+                    boolean skip = false;
+                    for (Pattern p : excludePatterns) {
+                        if (p.matcher(url.toString()).matches()) {
+                            skip = false;
+                            break;
+                        }
+                    }
+                    if (skip) continue;
+                }
                 if (url.getPath().endsWith(".jar")) {
                     urljares.add(url);
                 } else {
@@ -371,10 +519,16 @@ public final class ClassFilter<T> {
                             if (entryname.endsWith(".class") && entryname.indexOf('$') < 0) {
                                 String classname = entryname.substring(0, entryname.length() - 6);
                                 if (classname.startsWith("javax.") || classname.startsWith("com.sun.")) continue;
+                                //常见的jar跳过
+                                if (classname.startsWith("com.mysql.")) break;
+                                if (classname.startsWith("org.mariadb.")) break;
+                                if (classname.startsWith("oracle.jdbc.")) break;
+                                if (classname.startsWith("org.postgresql.")) break;
+                                if (classname.startsWith("com.microsoft.sqlserver.")) break;
                                 classes.add(classname);
                                 if (debug) debugstr.append(classname).append("\r\n");
                                 for (final ClassFilter filter : filters) {
-                                    if (filter != null) filter.filter(null, classname);
+                                    if (filter != null) filter.filter(null, classname, url);
                                 }
                             }
                         }
@@ -383,7 +537,7 @@ public final class ClassFilter<T> {
                 } else {
                     for (String classname : classes) {
                         for (final ClassFilter filter : filters) {
-                            if (filter != null) filter.filter(null, classname);
+                            if (filter != null) filter.filter(null, classname, url);
                         }
                     }
                 }
@@ -395,21 +549,21 @@ public final class ClassFilter<T> {
                     files.clear();
                     File root = new File(url.getFile());
                     String rootpath = root.getPath();
-                    loadClassFiles(exclude, root, files);
+                    loadClassFiles(excludeFile, root, files);
                     for (File f : files) {
                         String classname = f.getPath().substring(rootpath.length() + 1, f.getPath().length() - 6).replace(File.separatorChar, '.');
                         if (classname.startsWith("javax.") || classname.startsWith("com.sun.")) continue;
                         classes.add(classname);
                         if (debug) debugstr.append(classname).append("\r\n");
                         for (final ClassFilter filter : filters) {
-                            if (filter != null) filter.filter(null, classname);
+                            if (filter != null) filter.filter(null, classname, url);
                         }
                     }
                     cache.put(url, classes);
                 } else {
                     for (String classname : classes) {
                         for (final ClassFilter filter : filters) {
-                            if (filter != null) filter.filter(null, classname);
+                            if (filter != null) filter.filter(null, classname, url);
                         }
                     }
                 }
@@ -422,7 +576,9 @@ public final class ClassFilter<T> {
                 files.add(root);
             } else if (root.isDirectory()) {
                 if (exclude != null && exclude.equals(root)) return;
-                for (File f : root.listFiles()) {
+                File[] lfs = root.listFiles();
+                if (lfs == null) throw new RuntimeException("File(" + root + ") cannot listFiles()");
+                for (File f : lfs) {
                     loadClassFiles(exclude, f, files);
                 }
             }

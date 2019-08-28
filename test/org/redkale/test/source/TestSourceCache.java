@@ -5,6 +5,7 @@
  */
 package org.redkale.test.source;
 
+import java.lang.reflect.Method;
 import java.util.*;
 import org.redkale.source.VirtualEntity;
 import org.redkale.source.FilterNodeBean;
@@ -16,8 +17,10 @@ import org.redkale.source.Flipper;
 import org.redkale.source.EntityInfo;
 import org.redkale.source.FilterNode;
 import java.util.concurrent.*;
+import java.util.function.BiFunction;
 import javax.persistence.*;
 import org.redkale.convert.json.*;
+import org.redkale.source.*;
 
 /**
  *
@@ -40,7 +43,11 @@ public class TestSourceCache {
     }
 
     public static void main(String[] args) throws Exception {
-        final EntityInfo<TestEntity> info = EntityInfo.load(TestEntity.class, 0, false,new Properties(), null);
+        final BiFunction<DataSource, Class, List> fullloader = (DataSource t, Class u) -> null;
+        Method method = EntityInfo.class.getDeclaredMethod("load", Class.class, boolean.class, Properties.class,
+            DataSource.class, BiFunction.class);
+        method.setAccessible(true);
+        final EntityInfo<TestEntity> info = (EntityInfo<TestEntity>) method.invoke(null, TestEntity.class, false, new Properties(), null, fullloader);
         TestEntity[] entitys = new TestEntity[10_0000];
         for (int i = 0; i < entitys.length; i++) {
             entitys[i] = new TestEntity(i + 1, "用户_" + (i + 1));
@@ -79,7 +86,7 @@ public class TestSourceCache {
         }
         cdl.await();
         e = System.currentTimeMillis() - s;
-        System.out.println("十万条数据中查询一页记录耗时： " + e / 1000.0 + " 秒 " + sheet);  // CopyOnWriteArrayList   0.798    ConcurrentLinkedQueue 1.063
+        System.out.println("十万条数据中100并发查询一页循环10次记录耗时： " + e / 1000.0 + " 秒 " + sheet);  // CopyOnWriteArrayList   0.798    ConcurrentLinkedQueue 1.063
     }
 
     @VirtualEntity

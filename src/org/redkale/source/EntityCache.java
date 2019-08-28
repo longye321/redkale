@@ -6,19 +6,22 @@
 package org.redkale.source;
 
 import java.io.Serializable;
+import java.lang.reflect.Array;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
 import java.util.function.*;
 import java.util.logging.*;
 import java.util.stream.*;
-import javax.persistence.Transient;
+import javax.persistence.*;
 import static org.redkale.source.FilterFunc.*;
 import org.redkale.util.*;
 
 /**
+ * Entity数据的缓存类
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  * @param <T> Entity类的泛型
@@ -26,37 +29,69 @@ import org.redkale.util.*;
 @SuppressWarnings("unchecked")
 public final class EntityCache<T> {
 
+    //日志
     private static final Logger logger = Logger.getLogger(EntityCache.class.getName());
 
-    private final ConcurrentHashMap<Serializable, T> map = new ConcurrentHashMap();
+    //主键与对象的键值对
+    private ConcurrentHashMap<Serializable, T> map = new ConcurrentHashMap();
 
-    private final Collection<T> list = new ConcurrentLinkedQueue(); // CopyOnWriteArrayList 插入慢、查询快; 10w数据插入需要3.2秒; ConcurrentLinkedQueue 插入快、查询慢；10w数据查询需要 0.062秒，  查询慢40%;
+    // CopyOnWriteArrayList 插入慢、查询快; 10w数据插入需要3.2秒; ConcurrentLinkedQueue 插入快、查询慢；10w数据查询需要 0.062秒，  查询慢40%;
+    private Collection<T> list = new ConcurrentLinkedQueue();
 
+    //Flipper.sort转换成Comparator的缓存
     private final Map<String, Comparator<T>> sortComparators = new ConcurrentHashMap<>();
 
+    //Entity类
     private final Class<T> type;
 
+    //接口返回的对象是否需要复制一份
     private final boolean needcopy;
 
+    //Entity构建器
     private final Creator<T> creator;
 
+    //主键字段
     private final Attribute<T, Serializable> primary;
 
-    private final Reproduce<T, T> reproduce;
+    //新增时的复制器， 排除了标记为&#064;Transient的字段
+    private final Reproduce<T, T> newReproduce;
 
+    //修改时的复制器， 排除了标记为&#064;Transient或&#064;Column(updatable=false)的字段
+    private final Reproduce<T, T> chgReproduce;
+
+    //是否已经全量加载过
     private volatile boolean fullloaded;
 
+    //Entity信息
     final EntityInfo<T> info;
 
-    public EntityCache(final EntityInfo<T> info) {
+    //&#064;Cacheable的定时更新秒数，为0表示不定时更新
+    final int interval;
+
+    //&#064;Cacheable的定时器
+    private ScheduledThreadPoolExecutor scheduler;
+
+    public EntityCache(final EntityInfo<T> info, final Cacheable c) {
         this.info = info;
+        this.interval = c == null ? 0 : c.interval();
         this.type = info.getType();
         this.creator = info.getCreator();
         this.primary = info.primary;
-        this.needcopy = true;
-        this.reproduce = Reproduce.create(type, type, (m) -> {
+        VirtualEntity ve = info.getType().getAnnotation(VirtualEntity.class);
+        this.needcopy = ve == null || !ve.direct();
+        this.newReproduce = Reproduce.create(type, type, (m) -> {
             try {
                 return type.getDeclaredField(m).getAnnotation(Transient.class) == null;
+            } catch (Exception e) {
+                return true;
+            }
+        });
+        this.chgReproduce = Reproduce.create(type, type, (m) -> {
+            try {
+                java.lang.reflect.Field field = type.getDeclaredField(m);
+                if (field.getAnnotation(Transient.class) != null) return false;
+                Column column = field.getAnnotation(Column.class);
+                return (column == null || column.updatable());
             } catch (Exception e) {
                 return true;
             }
@@ -64,41 +99,77 @@ public final class EntityCache<T> {
     }
 
     public void fullLoad() {
-        if (info.fullloader == null) return;
-        clear();
-        List<T> all = info.fullloader.apply(type);
-        all.stream().filter(x -> x != null).forEach(x -> {
-            this.map.put(this.primary.get(x), x);
-        });
-        this.list.addAll(all);
+        if (info.fullloader == null) {
+            this.list = new ConcurrentLinkedQueue();
+            this.map = new ConcurrentHashMap();
+            this.fullloaded = true;
+            return;
+        }
+        this.fullloaded = false;
+        ConcurrentHashMap newmap = new ConcurrentHashMap();
+        List<T> all = info.fullloader.apply(info.source, type);
+        if (all != null) {
+            all.stream().filter(x -> x != null).forEach(x -> {
+                newmap.put(this.primary.get(x), x);
+            });
+        }
+        this.list = all == null ? new ConcurrentLinkedQueue() : new ConcurrentLinkedQueue(all);
+        this.map = newmap;
         this.fullloaded = true;
+        if (this.interval > 0) {
+            this.scheduler = new ScheduledThreadPoolExecutor(1, (Runnable r) -> {
+                final Thread t = new Thread(r, "EntityCache-" + type + "-Thread");
+                t.setDaemon(true);
+                return t;
+            });
+            this.scheduler.scheduleAtFixedRate(() -> {
+                try {
+                    ConcurrentHashMap newmap2 = new ConcurrentHashMap();
+                    List<T> all2 = info.fullloader.apply(info.source, type);
+                    if (all2 != null) {
+                        all2.stream().filter(x -> x != null).forEach(x -> {
+                            newmap2.put(this.primary.get(x), x);
+                        });
+                    }
+                    this.list = all2 == null ? new ConcurrentLinkedQueue() : new ConcurrentLinkedQueue(all2);
+                    this.map = newmap2;
+                } catch (Throwable t) {
+                    logger.log(Level.SEVERE, type + " schedule(interval=" + interval + "s) Cacheable error", t);
+                }
+            }, interval - System.currentTimeMillis() / 1000 % interval, interval, TimeUnit.SECONDS);
+        }
     }
 
     public Class<T> getType() {
         return type;
     }
 
-    public void clear() {
+    public int clear() {
         this.fullloaded = false;
-        this.list.clear();
-        this.map.clear();
+        this.list = new ConcurrentLinkedQueue();
+        this.map = new ConcurrentHashMap();
+        if (this.scheduler != null) {
+            this.scheduler.shutdownNow();
+            this.scheduler = null;
+        }
+        return 1;
     }
 
     public boolean isFullLoaded() {
         return fullloaded;
     }
 
-    public T find(Serializable id) {
-        if (id == null) return null;
-        T rs = map.get(id);
-        return rs == null ? null : (needcopy ? reproduce.copy(this.creator.create(), rs) : rs);
+    public T find(Serializable pk) {
+        if (pk == null) return null;
+        T rs = map.get(pk);
+        return rs == null ? null : (needcopy ? newReproduce.apply(this.creator.create(), rs) : rs);
     }
 
-    public T find(final SelectColumn selects, final Serializable id) {
-        if (id == null) return null;
-        T rs = map.get(id);
+    public T find(final SelectColumn selects, final Serializable pk) {
+        if (pk == null) return null;
+        T rs = map.get(pk);
         if (rs == null) return null;
-        if (selects == null) return (needcopy ? reproduce.copy(this.creator.create(), rs) : rs);
+        if (selects == null) return (needcopy ? newReproduce.apply(this.creator.create(), rs) : rs);
         T t = this.creator.create();
         for (Attribute attr : this.info.attributes) {
             if (selects.test(attr.field())) attr.set(t, attr.get(rs));
@@ -112,7 +183,7 @@ public final class EntityCache<T> {
         if (filter != null) stream = stream.filter(filter);
         Optional<T> opt = stream.findFirst();
         if (!opt.isPresent()) return null;
-        if (selects == null) return (needcopy ? reproduce.copy(this.creator.create(), opt.get()) : opt.get());
+        if (selects == null) return (needcopy ? newReproduce.apply(this.creator.create(), opt.get()) : opt.get());
         T rs = opt.get();
         T t = this.creator.create();
         for (Attribute attr : this.info.attributes) {
@@ -121,25 +192,58 @@ public final class EntityCache<T> {
         return t;
     }
 
-    public boolean exists(Serializable id) {
-        if (id == null) return false;
-        final Class atype = this.primary.type();
-        if (id.getClass() != atype && id instanceof Number) {
-            if (atype == int.class || atype == Integer.class) {
-                id = ((Number) id).intValue();
-            } else if (atype == long.class || atype == Long.class) {
-                id = ((Number) id).longValue();
-            } else if (atype == short.class || atype == Short.class) {
-                id = ((Number) id).shortValue();
-            } else if (atype == float.class || atype == Float.class) {
-                id = ((Number) id).floatValue();
-            } else if (atype == byte.class || atype == Byte.class) {
-                id = ((Number) id).byteValue();
-            } else if (atype == double.class || atype == Double.class) {
-                id = ((Number) id).doubleValue();
+    public Serializable findColumn(final String column, final Serializable defValue, final Serializable pk) {
+        if (pk == null) return defValue;
+        T rs = map.get(pk);
+        if (rs == null) return defValue;
+        for (Attribute attr : this.info.attributes) {
+            if (column.equals(attr.field())) {
+                Serializable val = (Serializable) attr.get(rs);
+                return val == null ? defValue : val;
             }
         }
-        return this.map.containsKey(id);
+        return defValue;
+    }
+
+    public Serializable findColumn(final String column, final Serializable defValue, FilterNode node) {
+        final Predicate<T> filter = node == null ? null : node.createPredicate(this);
+        Stream<T> stream = this.list.stream();
+        if (filter != null) stream = stream.filter(filter);
+        Optional<T> opt = stream.findFirst();
+        if (!opt.isPresent()) return defValue;
+        T rs = opt.get();
+        for (Attribute attr : this.info.attributes) {
+            if (column.equals(attr.field())) {
+                Serializable val = (Serializable) attr.get(rs);
+                return val == null ? defValue : val;
+            }
+        }
+        return defValue;
+    }
+
+    public boolean exists(Serializable pk) {
+        if (pk == null) return false;
+        final Class atype = this.primary.type();
+        if (pk.getClass() != atype && pk instanceof Number) {
+            if (atype == int.class || atype == Integer.class) {
+                pk = ((Number) pk).intValue();
+            } else if (atype == long.class || atype == Long.class) {
+                pk = ((Number) pk).longValue();
+            } else if (atype == short.class || atype == Short.class) {
+                pk = ((Number) pk).shortValue();
+            } else if (atype == float.class || atype == Float.class) {
+                pk = ((Number) pk).floatValue();
+            } else if (atype == byte.class || atype == Byte.class) {
+                pk = ((Number) pk).byteValue();
+            } else if (atype == double.class || atype == Double.class) {
+                pk = ((Number) pk).doubleValue();
+            } else if (atype == AtomicInteger.class) {
+                pk = new AtomicInteger(((Number) pk).intValue());
+            } else if (atype == AtomicLong.class) {
+                pk = new AtomicLong(((Number) pk).longValue());
+            }
+        }
+        return this.map.containsKey(pk);
     }
 
     public boolean exists(FilterNode node) {
@@ -161,34 +265,37 @@ public final class EntityCache<T> {
         if (filter != null) stream = stream.filter(filter);
         Collector<T, Map, ?> collector = null;
         final Class valtype = funcAttr == null ? null : funcAttr.type();
-        switch (func) {
-            case AVG:
-                if (valtype == float.class || valtype == Float.class || valtype == double.class || valtype == Double.class) {
-                    collector = (Collector<T, Map, ?>) Collectors.averagingDouble((T t) -> ((Number) funcAttr.get(t)).doubleValue());
-                } else {
-                    collector = (Collector<T, Map, ?>) Collectors.averagingLong((T t) -> ((Number) funcAttr.get(t)).longValue());
-                }
-                break;
-            case COUNT:
-                collector = (Collector<T, Map, ?>) Collectors.counting();
-                break;
-            case DISTINCTCOUNT:
-                collector = (Collector<T, Map, ?>) Collectors.mapping((t) -> funcAttr.get(t), Collectors.toSet());
-                break;
-            case MAX:
-            case MIN:
-                Comparator<T> comp = (o1, o2) -> o1 == null ? (o2 == null ? 0 : -1) : ((Comparable) funcAttr.get(o1)).compareTo(funcAttr.get(o2));
-                collector = (Collector<T, Map, ?>) ((func == MAX) ? Collectors.maxBy(comp) : Collectors.minBy(comp));
-                break;
-            case SUM:
-                if (valtype == float.class || valtype == Float.class || valtype == double.class || valtype == Double.class) {
-                    collector = (Collector<T, Map, ?>) Collectors.summingDouble((T t) -> ((Number) funcAttr.get(t)).doubleValue());
-                } else {
-                    collector = (Collector<T, Map, ?>) Collectors.summingLong((T t) -> ((Number) funcAttr.get(t)).longValue());
-                }
-                break;
+        if (func != null) {
+            switch (func) {
+                case AVG:
+                    if (valtype == float.class || valtype == Float.class || valtype == double.class || valtype == Double.class) {
+                        collector = (Collector<T, Map, ?>) Collectors.averagingDouble((T t) -> ((Number) funcAttr.get(t)).doubleValue());
+                    } else {
+                        collector = (Collector<T, Map, ?>) Collectors.averagingLong((T t) -> ((Number) funcAttr.get(t)).longValue());
+                    }
+                    break;
+                case COUNT:
+                    collector = (Collector<T, Map, ?>) Collectors.counting();
+                    break;
+                case DISTINCTCOUNT:
+                    collector = (Collector<T, Map, ?>) Collectors.mapping((t) -> funcAttr.get(t), Collectors.toSet());
+                    break;
+                case MAX:
+                case MIN:
+                    Comparator<T> comp = (o1, o2) -> o1 == null ? (o2 == null ? 0 : -1) : ((Comparable) funcAttr.get(o1)).compareTo(funcAttr.get(o2));
+                    collector = (Collector<T, Map, ?>) ((func == MAX) ? Collectors.maxBy(comp) : Collectors.minBy(comp));
+                    break;
+                case SUM:
+                    if (valtype == float.class || valtype == Float.class || valtype == double.class || valtype == Double.class) {
+                        collector = (Collector<T, Map, ?>) Collectors.summingDouble((T t) -> ((Number) funcAttr.get(t)).doubleValue());
+                    } else {
+                        collector = (Collector<T, Map, ?>) Collectors.summingLong((T t) -> ((Number) funcAttr.get(t)).longValue());
+                    }
+                    break;
+            }
         }
-        Map rs = stream.collect(Collectors.groupingBy(t -> keyAttr.get(t), LinkedHashMap::new, collector));
+        Map rs = collector == null ? stream.collect(Collectors.toMap(t -> keyAttr.get(t), t -> funcAttr.get(t), (key1, key2) -> key2))
+            : stream.collect(Collectors.groupingBy(t -> keyAttr.get(t), LinkedHashMap::new, collector));
         if (func == MAX || func == MIN) {
             Map rs2 = new LinkedHashMap();
             rs.forEach((x, y) -> {
@@ -197,29 +304,34 @@ public final class EntityCache<T> {
             rs = rs2;
         } else if (func == DISTINCTCOUNT) {
             Map rs2 = new LinkedHashMap();
-            rs.forEach((x, y) -> rs2.put(x, ((Set) y).size()));
+            rs.forEach((x, y) -> rs2.put(x, ((Set) y).size() + 0L));
             rs = rs2;
         }
         return rs;
     }
 
-    public <V> Number getNumberResult(final FilterFunc func, final String column, FilterNode node) {
+    public <V> Number getNumberResult(final FilterFunc func, final Number defResult, final String column, final FilterNode node) {
         final Attribute<T, Serializable> attr = column == null ? null : info.getAttribute(column);
         final Predicate<T> filter = node == null ? null : node.createPredicate(this);
         Stream<T> stream = this.list.stream();
         if (filter != null) stream = stream.filter(filter);
         switch (func) {
             case AVG:
-                if (attr.type() == int.class || attr.type() == Integer.class) {
-                    return (int) stream.mapToInt(x -> (Integer) attr.get(x)).average().orElse(0);
-                } else if (attr.type() == long.class || attr.type() == Long.class) {
-                    return (long) stream.mapToLong(x -> (Long) attr.get(x)).average().orElse(0);
+                if (attr.type() == int.class || attr.type() == Integer.class || attr.type() == AtomicInteger.class) {
+                    OptionalDouble rs = stream.mapToInt(x -> ((Number) attr.get(x)).intValue()).average();
+                    return rs.isPresent() ? (int) rs.getAsDouble() : defResult;
+                } else if (attr.type() == long.class || attr.type() == Long.class || attr.type() == AtomicLong.class) {
+                    OptionalDouble rs = stream.mapToLong(x -> ((Number) attr.get(x)).longValue()).average();
+                    return rs.isPresent() ? (long) rs.getAsDouble() : defResult;
                 } else if (attr.type() == short.class || attr.type() == Short.class) {
-                    return (short) stream.mapToInt(x -> ((Short) attr.get(x)).intValue()).average().orElse(0);
+                    OptionalDouble rs = stream.mapToInt(x -> ((Short) attr.get(x)).intValue()).average();
+                    return rs.isPresent() ? (short) rs.getAsDouble() : defResult;
                 } else if (attr.type() == float.class || attr.type() == Float.class) {
-                    return (float) stream.mapToDouble(x -> ((Float) attr.get(x)).doubleValue()).average().orElse(0);
+                    OptionalDouble rs = stream.mapToDouble(x -> ((Float) attr.get(x)).doubleValue()).average();
+                    return rs.isPresent() ? (float) rs.getAsDouble() : defResult;
                 } else if (attr.type() == double.class || attr.type() == Double.class) {
-                    return stream.mapToDouble(x -> (Double) attr.get(x)).average().orElse(0);
+                    OptionalDouble rs = stream.mapToDouble(x -> (Double) attr.get(x)).average();
+                    return rs.isPresent() ? rs.getAsDouble() : defResult;
                 }
                 throw new RuntimeException("getNumberResult error(type:" + type + ", attr.declaringClass: " + attr.declaringClass() + ", attr.field: " + attr.field() + ", attr.type: " + attr.type());
             case COUNT:
@@ -228,38 +340,48 @@ public final class EntityCache<T> {
                 return stream.map(x -> attr.get(x)).distinct().count();
 
             case MAX:
-                if (attr.type() == int.class || attr.type() == Integer.class) {
-                    return stream.mapToInt(x -> (Integer) attr.get(x)).max().orElse(0);
-                } else if (attr.type() == long.class || attr.type() == Long.class) {
-                    return stream.mapToLong(x -> (Long) attr.get(x)).max().orElse(0);
+                if (attr.type() == int.class || attr.type() == Integer.class || attr.type() == AtomicInteger.class) {
+                    OptionalInt rs = stream.mapToInt(x -> ((Number) attr.get(x)).intValue()).max();
+                    return rs.isPresent() ? rs.getAsInt() : defResult;
+                } else if (attr.type() == long.class || attr.type() == Long.class || attr.type() == AtomicLong.class) {
+                    OptionalLong rs = stream.mapToLong(x -> ((Number) attr.get(x)).longValue()).max();
+                    return rs.isPresent() ? rs.getAsLong() : defResult;
                 } else if (attr.type() == short.class || attr.type() == Short.class) {
-                    return (short) stream.mapToInt(x -> ((Short) attr.get(x)).intValue()).max().orElse(0);
+                    OptionalInt rs = stream.mapToInt(x -> ((Short) attr.get(x)).intValue()).max();
+                    return rs.isPresent() ? (short) rs.getAsInt() : defResult;
                 } else if (attr.type() == float.class || attr.type() == Float.class) {
-                    return (float) stream.mapToDouble(x -> ((Float) attr.get(x)).doubleValue()).max().orElse(0);
+                    OptionalDouble rs = stream.mapToDouble(x -> ((Float) attr.get(x)).doubleValue()).max();
+                    return rs.isPresent() ? (float) rs.getAsDouble() : defResult;
                 } else if (attr.type() == double.class || attr.type() == Double.class) {
-                    return stream.mapToDouble(x -> (Double) attr.get(x)).max().orElse(0);
+                    OptionalDouble rs = stream.mapToDouble(x -> (Double) attr.get(x)).max();
+                    return rs.isPresent() ? rs.getAsDouble() : defResult;
                 }
                 throw new RuntimeException("getNumberResult error(type:" + type + ", attr.declaringClass: " + attr.declaringClass() + ", attr.field: " + attr.field() + ", attr.type: " + attr.type());
 
             case MIN:
-                if (attr.type() == int.class || attr.type() == Integer.class) {
-                    return stream.mapToInt(x -> (Integer) attr.get(x)).min().orElse(0);
-                } else if (attr.type() == long.class || attr.type() == Long.class) {
-                    return stream.mapToLong(x -> (Long) attr.get(x)).min().orElse(0);
+                if (attr.type() == int.class || attr.type() == Integer.class || attr.type() == AtomicInteger.class) {
+                    OptionalInt rs = stream.mapToInt(x -> ((Number) attr.get(x)).intValue()).min();
+                    return rs.isPresent() ? rs.getAsInt() : defResult;
+                } else if (attr.type() == long.class || attr.type() == Long.class || attr.type() == AtomicLong.class) {
+                    OptionalLong rs = stream.mapToLong(x -> ((Number) attr.get(x)).longValue()).min();
+                    return rs.isPresent() ? rs.getAsLong() : defResult;
                 } else if (attr.type() == short.class || attr.type() == Short.class) {
-                    return (short) stream.mapToInt(x -> ((Short) attr.get(x)).intValue()).min().orElse(0);
+                    OptionalInt rs = stream.mapToInt(x -> ((Short) attr.get(x)).intValue()).min();
+                    return rs.isPresent() ? (short) rs.getAsInt() : defResult;
                 } else if (attr.type() == float.class || attr.type() == Float.class) {
-                    return (float) stream.mapToDouble(x -> ((Float) attr.get(x)).doubleValue()).min().orElse(0);
+                    OptionalDouble rs = stream.mapToDouble(x -> ((Float) attr.get(x)).doubleValue()).min();
+                    return rs.isPresent() ? (float) rs.getAsDouble() : defResult;
                 } else if (attr.type() == double.class || attr.type() == Double.class) {
-                    return stream.mapToDouble(x -> (Double) attr.get(x)).min().orElse(0);
+                    OptionalDouble rs = stream.mapToDouble(x -> (Double) attr.get(x)).min();
+                    return rs.isPresent() ? rs.getAsDouble() : defResult;
                 }
                 throw new RuntimeException("getNumberResult error(type:" + type + ", attr.declaringClass: " + attr.declaringClass() + ", attr.field: " + attr.field() + ", attr.type: " + attr.type());
 
             case SUM:
-                if (attr.type() == int.class || attr.type() == Integer.class) {
-                    return stream.mapToInt(x -> (Integer) attr.get(x)).sum();
-                } else if (attr.type() == long.class || attr.type() == Long.class) {
-                    return stream.mapToLong(x -> (Long) attr.get(x)).sum();
+                if (attr.type() == int.class || attr.type() == Integer.class || attr.type() == AtomicInteger.class) {
+                    return stream.mapToInt(x -> ((Number) attr.get(x)).intValue()).sum();
+                } else if (attr.type() == long.class || attr.type() == Long.class || attr.type() == AtomicLong.class) {
+                    return stream.mapToLong(x -> ((Number) attr.get(x)).longValue()).sum();
                 } else if (attr.type() == short.class || attr.type() == Short.class) {
                     return (short) stream.mapToInt(x -> ((Short) attr.get(x)).intValue()).sum();
                 } else if (attr.type() == float.class || attr.type() == Float.class) {
@@ -269,7 +391,7 @@ public final class EntityCache<T> {
                 }
                 throw new RuntimeException("getNumberResult error(type:" + type + ", attr.declaringClass: " + attr.declaringClass() + ", attr.field: " + attr.field() + ", attr.type: " + attr.type());
         }
-        return -1;
+        return defResult;
     }
 
     public Sheet<T> querySheet(final SelectColumn selects, final Flipper flipper, final FilterNode node) {
@@ -289,10 +411,11 @@ public final class EntityCache<T> {
         Stream<T> stream = this.list.stream();
         if (filter != null) stream = stream.filter(filter);
         if (comparator != null) stream = stream.sorted(comparator);
-        if (flipper != null) stream = stream.skip(flipper.index()).limit(flipper.getSize());
+        if (flipper != null && flipper.getOffset() > 0) stream = stream.skip(flipper.getOffset());
+        if (flipper != null && flipper.getLimit() > 0) stream = stream.limit(flipper.getLimit());
         final List<T> rs = new ArrayList<>();
         if (selects == null) {
-            Consumer<? super T> action = x -> rs.add(needcopy ? reproduce.copy(creator.create(), x) : x);
+            Consumer<? super T> action = x -> rs.add(needcopy ? newReproduce.apply(creator.create(), x) : x);
             if (comparator != null) {
                 stream.forEachOrdered(action);
             } else {
@@ -320,26 +443,35 @@ public final class EntityCache<T> {
         return new Sheet<>(total, rs);
     }
 
-    public void insert(T value) {
-        if (value == null) return;
-        final T rs = reproduce.copy(this.creator.create(), value);  //确保同一主键值的map与list中的对象必须共用。
-        T old = this.map.put(this.primary.get(rs), rs);
+    public int insert(T entity) {
+        if (entity == null) return 0;
+        final T rs = newReproduce.apply(this.creator.create(), entity);  //确保同一主键值的map与list中的对象必须共用。
+        T old = this.map.putIfAbsent(this.primary.get(rs), rs);
         if (old == null) {
             this.list.add(rs);
+            return 1;
         } else {
-            logger.log(Level.WARNING, "cache repeat insert data: " + value);
+            logger.log(Level.WARNING, this.type + " cache repeat insert data: " + entity);
+            return 0;
         }
     }
 
-    public void delete(final Serializable id) {
-        if (id == null) return;
-        final T rs = this.map.remove(id);
-        if (rs != null) this.list.remove(rs);
+    public int delete(final Serializable pk) {
+        if (pk == null) return 0;
+        final T rs = this.map.remove(pk);
+        if (rs == null) return 0;
+        this.list.remove(rs);
+        return 1;
     }
 
-    public Serializable[] delete(final FilterNode node) {
+    public Serializable[] delete(final Flipper flipper, final FilterNode node) {
         if (node == null || this.list.isEmpty()) return new Serializable[0];
-        Object[] rms = this.list.stream().filter(node.createPredicate(this)).toArray();
+        final Comparator<T> comparator = createComparator(flipper);
+        Stream<T> stream = this.list.stream().filter(node.createPredicate(this));
+        if (comparator != null) stream = stream.sorted(comparator);
+        if (flipper != null && flipper.getOffset() > 0) stream = stream.skip(flipper.getOffset());
+        if (flipper != null && flipper.getLimit() > 0) stream = stream.limit(flipper.getLimit());
+        Object[] rms = stream.toArray();
         Serializable[] ids = new Serializable[rms.length];
         int i = -1;
         for (Object o : rms) {
@@ -351,71 +483,229 @@ public final class EntityCache<T> {
         return ids;
     }
 
-    public void update(final T value) {
-        if (value == null) return;
-        T rs = this.map.get(this.primary.get(value));
-        if (rs == null) return;
-        this.reproduce.copy(rs, value);
+    public int drop() {
+        return clear();
     }
 
-    public T update(final T value, Collection<Attribute<T, Serializable>> attrs) {
-        if (value == null) return value;
-        T rs = this.map.get(this.primary.get(value));
+    public int update(final T entity) {
+        if (entity == null) return 0;
+        T rs = this.map.get(this.primary.get(entity));
+        if (rs == null) return 0;
+        synchronized (rs) {
+            this.chgReproduce.apply(rs, entity);
+        }
+        return 1;
+    }
+
+    public T update(final T entity, Collection<Attribute<T, Serializable>> attrs) {
+        if (entity == null) return entity;
+        T rs = this.map.get(this.primary.get(entity));
         if (rs == null) return rs;
-        for (Attribute attr : attrs) {
-            attr.set(rs, attr.get(value));
+        synchronized (rs) {
+            for (Attribute attr : attrs) {
+                attr.set(rs, attr.get(entity));
+            }
         }
         return rs;
     }
 
-    public <V> T update(final Serializable id, Attribute<T, V> attr, final V fieldValue) {
-        if (id == null) return null;
-        T rs = this.map.get(id);
+    public T[] update(final T entity, final Collection<Attribute<T, Serializable>> attrs, final FilterNode node) {
+        if (entity == null || node == null) return (T[]) Array.newInstance(type, 0);
+        T[] rms = this.list.stream().filter(node.createPredicate(this)).toArray(len -> (T[]) Array.newInstance(type, len));
+        for (T rs : rms) {
+            synchronized (rs) {
+                for (Attribute attr : attrs) {
+                    attr.set(rs, attr.get(entity));
+                }
+            }
+        }
+        return rms;
+    }
+
+    public <V> T update(final Serializable pk, Attribute<T, V> attr, final V fieldValue) {
+        if (pk == null) return null;
+        T rs = this.map.get(pk);
         if (rs != null) attr.set(rs, fieldValue);
         return rs;
     }
 
-    public <V> T updateColumnOr(final Serializable id, Attribute<T, V> attr, final long orvalue) {
-        if (id == null) return null;
-        T rs = this.map.get(id);
-        if (rs == null) return rs;
-        Number numb = (Number) attr.get(rs);
-        return updateColumnIncrAndOr(attr, rs, (numb == null) ? orvalue : (numb.longValue() | orvalue));
-    }
-
-    public <V> T updateColumnAnd(final Serializable id, Attribute<T, V> attr, final long andvalue) {
-        if (id == null) return null;
-        T rs = this.map.get(id);
-        if (rs == null) return rs;
-        Number numb = (Number) attr.get(rs);
-        return updateColumnIncrAndOr(attr, rs, (numb == null) ? 0 : (numb.longValue() & andvalue));
-    }
-
-    public <V> T updateColumnIncrement(final Serializable id, Attribute<T, V> attr, final long incvalue) {
-        if (id == null) return null;
-        T rs = this.map.get(id);
-        if (rs == null) return rs;
-        Number numb = (Number) attr.get(rs);
-        return updateColumnIncrAndOr(attr, rs, (numb == null) ? incvalue : (numb.longValue() + incvalue));
-    }
-
-    private <V> T updateColumnIncrAndOr(Attribute<T, V> attr, final T rs, Number numb) {
-        final Class ft = attr.type();
-        if (ft == int.class || ft == Integer.class) {
-            numb = numb.intValue();
-        } else if (ft == long.class || ft == Long.class) {
-            numb = numb.longValue();
-        } else if (ft == short.class || ft == Short.class) {
-            numb = numb.shortValue();
-        } else if (ft == float.class || ft == Float.class) {
-            numb = numb.floatValue();
-        } else if (ft == double.class || ft == Double.class) {
-            numb = numb.doubleValue();
-        } else if (ft == byte.class || ft == Byte.class) {
-            numb = numb.byteValue();
+    public <V> T[] update(Attribute<T, V> attr, final V fieldValue, final FilterNode node) {
+        if (attr == null || node == null) return (T[]) Array.newInstance(type, 0);
+        T[] rms = this.list.stream().filter(node.createPredicate(this)).toArray(len -> (T[]) Array.newInstance(type, len));
+        for (T rs : rms) {
+            attr.set(rs, fieldValue);
         }
-        attr.set(rs, (V) numb);
+        return rms;
+    }
+
+    public <V> T updateColumn(final Serializable pk, List<Attribute<T, Serializable>> attrs, final List<ColumnValue> values) {
+        if (pk == null || attrs == null || attrs.isEmpty()) return null;
+        T rs = this.map.get(pk);
+        if (rs == null) return rs;
+        synchronized (rs) {
+            for (int i = 0; i < attrs.size(); i++) {
+                ColumnValue cv = values.get(i);
+                updateColumn(attrs.get(i), rs, cv.getExpress(), cv.getValue());
+            }
+        }
         return rs;
+    }
+
+    public <V> T[] updateColumn(final FilterNode node, final Flipper flipper, List<Attribute<T, Serializable>> attrs, final List<ColumnValue> values) {
+        if (attrs == null || attrs.isEmpty() || node == null) return (T[]) Array.newInstance(type, 0);
+        Stream<T> stream = this.list.stream();
+        final Comparator<T> comparator = createComparator(flipper);
+        if (comparator != null) stream = stream.sorted(comparator);
+        if (flipper != null && flipper.getLimit() > 0) stream = stream.limit(flipper.getLimit());
+        T[] rms = stream.filter(node.createPredicate(this)).toArray(len -> (T[]) Array.newInstance(type, len));
+        for (T rs : rms) {
+            synchronized (rs) {
+                for (int i = 0; i < attrs.size(); i++) {
+                    ColumnValue cv = values.get(i);
+                    updateColumn(attrs.get(i), rs, cv.getExpress(), cv.getValue());
+                }
+            }
+        }
+        return rms;
+    }
+
+    public <V> T updateColumnOr(final Serializable pk, Attribute<T, V> attr, final long orvalue) {
+        if (pk == null) return null;
+        T rs = this.map.get(pk);
+        if (rs == null) return rs;
+        synchronized (rs) {
+            return updateColumn(attr, rs, ColumnExpress.ORR, orvalue);
+        }
+    }
+
+    public <V> T updateColumnAnd(final Serializable pk, Attribute<T, V> attr, final long andvalue) {
+        if (pk == null) return null;
+        T rs = this.map.get(pk);
+        if (rs == null) return rs;
+        synchronized (rs) {
+            return updateColumn(attr, rs, ColumnExpress.AND, andvalue);
+        }
+    }
+
+    public <V> T updateColumnIncrement(final Serializable pk, Attribute<T, V> attr, final long incvalue) {
+        if (pk == null) return null;
+        T rs = this.map.get(pk);
+        if (rs == null) return rs;
+        synchronized (rs) {
+            return updateColumn(attr, rs, ColumnExpress.INC, incvalue);
+        }
+    }
+
+    private <V> T updateColumn(Attribute<T, V> attr, final T entity, final ColumnExpress express, Serializable val) {
+        final Class ft = attr.type();
+        Number numb = null;
+        Serializable newval = null;
+        switch (express) {
+            case INC:
+            case MUL:
+            case DIV:
+            case MOD:
+            case AND:
+            case ORR:
+                numb = getValue((Number) attr.get(entity), express, val);
+                break;
+            case MOV:
+                if (val instanceof ColumnNodeValue) val = updateColumnNodeValue(attr, entity, (ColumnNodeValue) val);
+                newval = val;
+                if (val instanceof Number) numb = (Number) val;
+                break;
+        }
+        if (numb != null) {
+            if (ft == int.class || ft == Integer.class) {
+                newval = numb.intValue();
+            } else if (ft == long.class || ft == Long.class) {
+                newval = numb.longValue();
+            } else if (ft == short.class || ft == Short.class) {
+                newval = numb.shortValue();
+            } else if (ft == float.class || ft == Float.class) {
+                newval = numb.floatValue();
+            } else if (ft == double.class || ft == Double.class) {
+                newval = numb.doubleValue();
+            } else if (ft == byte.class || ft == Byte.class) {
+                newval = numb.byteValue();
+            } else if (ft == AtomicInteger.class) {
+                newval = new AtomicInteger(numb.intValue());
+            } else if (ft == AtomicLong.class) {
+                newval = new AtomicLong(numb.longValue());
+            }
+        } else {
+            if (ft == AtomicInteger.class && newval != null && newval.getClass() != AtomicInteger.class) {
+                newval = new AtomicInteger(((Number) newval).intValue());
+            } else if (ft == AtomicLong.class && newval != null && newval.getClass() != AtomicLong.class) {
+                newval = new AtomicLong(((Number) newval).longValue());
+            }
+        }
+        attr.set(entity, (V) newval);
+        return entity;
+    }
+
+    private <V> Serializable updateColumnNodeValue(Attribute<T, V> attr, final T entity, ColumnNodeValue node) {
+        Serializable left = node.getLeft();
+        if (left instanceof CharSequence) {
+            left = info.getUpdateAttribute(left.toString()).get(entity);
+        } else if (left instanceof ColumnNodeValue) {
+            left = updateColumnNodeValue(attr, entity, (ColumnNodeValue) left);
+        }
+        Serializable right = node.getRight();
+        if (left instanceof CharSequence) {
+            right = info.getUpdateAttribute(right.toString()).get(entity);
+        } else if (left instanceof ColumnNodeValue) {
+            right = updateColumnNodeValue(attr, entity, (ColumnNodeValue) right);
+        }
+        return getValue((Number) left, node.getExpress(), right);
+    }
+
+    private <V> Number getValue(Number numb, final ColumnExpress express, Serializable val) {
+        switch (express) {
+            case INC:
+                if (numb == null) {
+                    numb = (Number) val;
+                } else {
+                    numb = numb.longValue() + ((Number) val).longValue();
+                }
+                break;
+            case MUL:
+                if (numb == null) {
+                    numb = 0;
+                } else {
+                    numb = numb.longValue() * ((Number) val).floatValue();
+                }
+                break;
+            case DIV:
+                if (numb == null) {
+                    numb = 0;
+                } else {
+                    numb = numb.longValue() / ((Number) val).floatValue();
+                }
+                break;
+            case MOD:
+                if (numb == null) {
+                    numb = 0;
+                } else {
+                    numb = numb.longValue() % ((Number) val).intValue();
+                }
+                break;
+            case AND:
+                if (numb == null) {
+                    numb = 0;
+                } else {
+                    numb = numb.longValue() & ((Number) val).longValue();
+                }
+                break;
+            case ORR:
+                if (numb == null) {
+                    numb = 0;
+                } else {
+                    numb = numb.longValue() | ((Number) val).longValue();
+                }
+                break;
+        }
+        return numb;
     }
 
     public Attribute<T, Serializable> getAttribute(String fieldname) {
@@ -424,7 +714,7 @@ public final class EntityCache<T> {
 
     //-------------------------------------------------------------------------------------------------------------------------------
     protected Comparator<T> createComparator(Flipper flipper) {
-        if (flipper == null || flipper.getSort() == null || flipper.getSort().isEmpty()) return null;
+        if (flipper == null || flipper.getSort() == null || flipper.getSort().isEmpty() || flipper.getSort().indexOf(';') >= 0 || flipper.getSort().indexOf('\n') >= 0) return null;
         final String sort = flipper.getSort();
         Comparator<T> comparator = this.sortComparators.get(sort);
         if (comparator != null) return comparator;
@@ -440,121 +730,19 @@ public final class EntityCache<T> {
                 final Attribute<T, Serializable> pattr = getAttribute(sub[0].substring(pos + 1, pos2));
                 final String func = sub[0].substring(0, pos);
                 if ("ABS".equalsIgnoreCase(func)) {
-                    if (pattr.type() == int.class || pattr.type() == Integer.class) {
-                        attr = new Attribute<T, Serializable>() {
-
-                            @Override
-                            public Class type() {
-                                return pattr.type();
-                            }
-
-                            @Override
-                            public Class declaringClass() {
-                                return pattr.declaringClass();
-                            }
-
-                            @Override
-                            public String field() {
-                                return pattr.field();
-                            }
-
-                            @Override
-                            public Serializable get(T obj) {
-                                return Math.abs(((Number) pattr.get(obj)).intValue());
-                            }
-
-                            @Override
-                            public void set(T obj, Serializable value) {
-                                pattr.set(obj, value);
-                            }
-                        };
-                    } else if (pattr.type() == long.class || pattr.type() == Long.class) {
-                        attr = new Attribute<T, Serializable>() {
-
-                            @Override
-                            public Class type() {
-                                return pattr.type();
-                            }
-
-                            @Override
-                            public Class declaringClass() {
-                                return pattr.declaringClass();
-                            }
-
-                            @Override
-                            public String field() {
-                                return pattr.field();
-                            }
-
-                            @Override
-                            public Serializable get(T obj) {
-                                return Math.abs(((Number) pattr.get(obj)).longValue());
-                            }
-
-                            @Override
-                            public void set(T obj, Serializable value) {
-                                pattr.set(obj, value);
-                            }
-                        };
+                    Function getter = null;
+                    if (pattr.type() == int.class || pattr.type() == Integer.class || pattr.type() == AtomicInteger.class) {
+                        getter = x -> Math.abs(((Number) pattr.get((T) x)).intValue());
+                    } else if (pattr.type() == long.class || pattr.type() == Long.class || pattr.type() == AtomicLong.class) {
+                        getter = x -> Math.abs(((Number) pattr.get((T) x)).longValue());
                     } else if (pattr.type() == float.class || pattr.type() == Float.class) {
-                        attr = new Attribute<T, Serializable>() {
-
-                            @Override
-                            public Class type() {
-                                return pattr.type();
-                            }
-
-                            @Override
-                            public Class declaringClass() {
-                                return pattr.declaringClass();
-                            }
-
-                            @Override
-                            public String field() {
-                                return pattr.field();
-                            }
-
-                            @Override
-                            public Serializable get(T obj) {
-                                return Math.abs(((Number) pattr.get(obj)).floatValue());
-                            }
-
-                            @Override
-                            public void set(T obj, Serializable value) {
-                                pattr.set(obj, value);
-                            }
-                        };
+                        getter = x -> Math.abs(((Number) pattr.get((T) x)).floatValue());
                     } else if (pattr.type() == double.class || pattr.type() == Double.class) {
-                        attr = new Attribute<T, Serializable>() {
-
-                            @Override
-                            public Class type() {
-                                return pattr.type();
-                            }
-
-                            @Override
-                            public Class declaringClass() {
-                                return pattr.declaringClass();
-                            }
-
-                            @Override
-                            public String field() {
-                                return pattr.field();
-                            }
-
-                            @Override
-                            public Serializable get(T obj) {
-                                return Math.abs(((Number) pattr.get(obj)).doubleValue());
-                            }
-
-                            @Override
-                            public void set(T obj, Serializable value) {
-                                pattr.set(obj, value);
-                            }
-                        };
+                        getter = x -> Math.abs(((Number) pattr.get((T) x)).doubleValue());
                     } else {
                         throw new RuntimeException("Flipper not supported sort illegal type by ABS (" + flipper.getSort() + ")");
                     }
+                    attr = (Attribute<T, Serializable>) Attribute.create(pattr.declaringClass(), pattr.field(), pattr.type(), getter, (o, v) -> pattr.set(o, v));
                 } else if (func.isEmpty()) {
                     attr = pattr;
                 } else {

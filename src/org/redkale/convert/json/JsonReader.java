@@ -10,9 +10,10 @@ import static org.redkale.convert.Reader.*;
 import org.redkale.util.*;
 
 /**
+ * JSON数据源
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  */
@@ -157,15 +158,32 @@ public class JsonReader extends Reader {
         this.position--;
     }
 
+    @Override
+    public final ValueType readType() {
+        char ch = nextGoodChar();
+        if (ch == '{') {
+            backChar(ch);
+            return ValueType.MAP;
+        }
+        if (ch == '[') {
+            backChar(ch);
+            return ValueType.ARRAY;
+        }
+        backChar(ch);
+        return ValueType.STRING;
+    }
+
     /**
      * 判断下一个非空白字符是否为{
      *
      * @param clazz 类名
+     *
      * @return 返回 null 表示对象为null， 返回空字符串表示当前class与返回的class一致，返回非空字符串表示class是当前class的子类。
      */
     @Override
     public String readObjectB(final Class clazz) {
         this.fieldIndex = 0; //必须要重置为0
+        if (this.text.length == 0) return null;
         char ch = this.text[++this.position];
         if (ch == '{') return "";
         if (ch <= ' ') {
@@ -187,11 +205,16 @@ public class JsonReader extends Reader {
     /**
      * 判断下一个非空白字符是否为{
      *
+     * @param member       DeMember
+     * @param typevals     byte[]
+     * @param keyDecoder   Decodeable
+     * @param valuedecoder Decodeable
+     *
      * @return SIGN_NOLENGTH 或 SIGN_NULL
      */
     @Override
-    public final int readMapB() {
-        return readArrayB();
+    public final int readMapB(DeMember member, byte[] typevals, Decodeable keyDecoder, Decodeable valuedecoder) {
+        return readArrayB(member, typevals, keyDecoder);
     }
 
     @Override
@@ -201,10 +224,15 @@ public class JsonReader extends Reader {
     /**
      * 判断下一个非空白字符是否为[
      *
+     * @param member           DeMember
+     * @param typevals         byte[]
+     * @param componentDecoder Decodeable
+     *
      * @return SIGN_NOLENGTH 或 SIGN_NULL
      */
     @Override
-    public int readArrayB() {
+    public int readArrayB(DeMember member, byte[] typevals, Decodeable componentDecoder) {
+        if (this.text.length == 0) return SIGN_NULL;
         char ch = this.text[++this.position];
         if (ch == '[') return SIGN_NOLENGTH;
         if (ch == '{') return SIGN_NOLENGTH;
@@ -242,13 +270,26 @@ public class JsonReader extends Reader {
         throw new ConvertException("'" + new String(text) + "'expected a ':' but '" + ch + "'(position = " + position + ") in (" + new String(this.text) + ")");
     }
 
+    @Override
+    public int position() {
+        return this.position;
+    }
+
+    @Override
+    public int readMemberContentLength(DeMember member, Decodeable decoder) {
+        return -1;
+    }
+
     /**
      * 判断对象是否存在下一个属性或者数组是否存在下一个元素
+     *
+     * @param startPosition 起始位置
+     * @param contentLength 内容大小， 不确定的传-1
      *
      * @return 是否存在
      */
     @Override
-    public boolean hasNext() {
+    public boolean hasNext(int startPosition, int contentLength) {
         char ch = this.text[++this.position];
         if (ch == ',') return true;
         if (ch == '}' || ch == ']') return false;
@@ -312,7 +353,7 @@ public class JsonReader extends Reader {
             }
             this.position = currpos - 1;
             if (len == 4 && text0[start] == 'n' && text0[start + 1] == 'u' && text0[start + 2] == 'l' && text0[start + 3] == 'l') return null;
-            return new String(text0, start, len);
+            return new String(text0, start, len == eof ? (len + 1) : len);
         }
     }
 
@@ -333,8 +374,16 @@ public class JsonReader extends Reader {
                 if (firstchar > ' ') break;
             }
         }
+        boolean quote = false;
         if (firstchar == '"' || firstchar == '\'') {
+            quote = true;
             firstchar = text0[++currpos];
+            if (firstchar <= ' ') {
+                for (;;) {
+                    firstchar = text0[++currpos];
+                    if (firstchar > ' ') break;
+                }
+            }
             if (firstchar == '"' || firstchar == '\'') {
                 this.position = currpos;
                 return 0;
@@ -350,7 +399,8 @@ public class JsonReader extends Reader {
             if (currpos == eof) break;
             char ch = text0[++currpos];
             int val = digits[ch];
-            if (val == -3) break;
+            if (quote && val == -3) continue;
+            if (val <= -3) break;
             if (val == -1) throw new ConvertException("illegal escape(" + ch + ") (position = " + currpos + ") but '" + ch + "' in (" + new String(this.text) + ")");
             if (val != -2) value = value * 10 + val;
         }
@@ -375,8 +425,16 @@ public class JsonReader extends Reader {
                 if (firstchar > ' ') break;
             }
         }
+        boolean quote = false;
         if (firstchar == '"' || firstchar == '\'') {
+            quote = true;
             firstchar = text0[++currpos];
+            if (firstchar <= ' ') {
+                for (;;) {
+                    firstchar = text0[++currpos];
+                    if (firstchar > ' ') break;
+                }
+            }
             if (firstchar == '"' || firstchar == '\'') {
                 this.position = currpos;
                 return 0L;
@@ -392,7 +450,8 @@ public class JsonReader extends Reader {
             if (currpos == eof) break;
             char ch = text0[++currpos];
             int val = digits[ch];
-            if (val == -3) break;
+            if (quote && val == -3) continue;
+            if (val <= -3) break;
             if (val == -1) throw new ConvertException("illegal escape(" + ch + ") (position = " + currpos + ") but '" + ch + "' in (" + new String(this.text) + ")");
             if (val != -2) value = value * 10 + val;
         }
@@ -403,6 +462,7 @@ public class JsonReader extends Reader {
     @Override
     public final DeMember readFieldName(final DeMember[] members) {
         final String exceptedfield = this.readSmallString();
+        if (exceptedfield == null) return null;
         final int len = members.length;
         if (this.fieldIndex >= len) this.fieldIndex = 0;
         for (int k = this.fieldIndex; k < len; k++) {
@@ -433,6 +493,41 @@ public class JsonReader extends Reader {
     }
 
     @Override
+    public final byte[] readByteArray() {
+        int len = readArrayB(null, null, null);
+        int contentLength = -1;
+        if (len == Reader.SIGN_NULL) return null;
+        if (len == Reader.SIGN_NOLENBUTBYTES) {
+            contentLength = readMemberContentLength(null, null);
+            len = Reader.SIGN_NOLENGTH;
+        }
+        if (len == Reader.SIGN_NOLENGTH) {
+            int size = 0;
+            byte[] data = new byte[8];
+            int startPosition = position();
+            while (hasNext(startPosition, contentLength)) {
+                if (size >= data.length) {
+                    byte[] newdata = new byte[data.length + 4];
+                    System.arraycopy(data, 0, newdata, 0, size);
+                    data = newdata;
+                }
+                data[size++] = readByte();
+            }
+            readArrayE();
+            byte[] newdata = new byte[size];
+            System.arraycopy(data, 0, newdata, 0, size);
+            return newdata;
+        } else {
+            byte[] values = new byte[len];
+            for (int i = 0; i < values.length; i++) {
+                values[i] = readByte();
+            }
+            readArrayE();
+            return values;
+        }
+    }
+
+    @Override
     public final char readChar() {
         return (char) readInt();
     }
@@ -445,6 +540,7 @@ public class JsonReader extends Reader {
     @Override
     public final float readFloat() {
         String chars = readSmallString();
+        if (chars != null) chars = chars.trim();
         if (chars == null || chars.isEmpty()) return 0.f;
         return Float.parseFloat(chars);
     }
@@ -452,6 +548,7 @@ public class JsonReader extends Reader {
     @Override
     public final double readDouble() {
         String chars = readSmallString();
+        if (chars != null) chars = chars.trim();
         if (chars == null || chars.isEmpty()) return 0.0;
         return Double.parseDouble(chars);
     }
@@ -473,12 +570,22 @@ public class JsonReader extends Reader {
             }
         }
         if (expected != '"' && expected != '\'') {
-            if (expected == 'n' && text0.length > currpos + 3) {
+            if (expected == 'n' && text0.length > currpos + 3 && (text0[1 + currpos] == 'u' && text0[2 + currpos] == 'l' && text0[3 + currpos] == 'l')) {
                 if (text0[++currpos] == 'u' && text0[++currpos] == 'l' && text0[++currpos] == 'l') {
                     this.position = currpos;
                     if (text0.length > currpos + 4) {
                         char ch = text0[currpos + 1];
                         if (ch == ',' || ch <= ' ' || ch == '}' || ch == ']' || ch == ':') return null;
+                        final int start = currpos - 3;
+                        for (;;) {
+                            if (currpos >= text0.length) break;
+                            ch = text0[currpos];
+                            if (ch == ',' || ch <= ' ' || ch == '}' || ch == ']' || ch == ':') break;
+                            currpos++;
+                        }
+                        if (currpos == start) throw new ConvertException("expected a string after a key but '" + text0[position] + "' (position = " + position + ") in (" + new String(this.text) + ")");
+                        this.position = currpos - 1;
+                        return new String(text0, start, currpos - start);
                     } else {
                         return null;
                     }
@@ -486,6 +593,7 @@ public class JsonReader extends Reader {
             } else {
                 final int start = currpos;
                 for (;;) {
+                    if (currpos >= text0.length) break;
                     char ch = text0[currpos];
                     if (ch == ',' || ch <= ' ' || ch == '}' || ch == ']' || ch == ':') break;
                     currpos++;
@@ -576,7 +684,8 @@ public class JsonReader extends Reader {
             digits[i] = i - 'A' + 10;
         }
         digits['"'] = digits['\''] = -2; //-2 跳过 
-        digits[','] = digits['}'] = digits[']'] = digits[' '] = digits['\t'] = digits['\r'] = digits['\n'] = digits[':'] = -3; //-3退出
+        digits[' '] = digits['\t'] = digits['\r'] = digits['\n'] = -3; //-3可能跳过
+        digits[','] = digits['}'] = digits[']'] = digits[':'] = -4; //-4退出
 
     }
 }

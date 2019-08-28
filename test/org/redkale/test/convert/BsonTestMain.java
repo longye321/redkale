@@ -11,8 +11,9 @@ import org.redkale.convert.bson.BsonFactory;
 import org.redkale.util.Utility;
 import org.redkale.convert.bson.BsonConvert;
 import java.nio.*;
-import java.util.Arrays;
+import java.util.*;
 import org.redkale.convert.json.*;
+import org.redkale.util.*;
 
 /**
  *
@@ -20,16 +21,19 @@ import org.redkale.convert.json.*;
  */
 public class BsonTestMain {
 
-    public static void main(String[] args) throws Exception {
+    public static void main(String[] args) throws Throwable {
         Serializable[] sers = new Serializable[]{"aaa", 4};
         final BsonConvert convert = BsonFactory.root().getConvert();
         byte[] bytes = convert.convertTo(sers);
-        Utility.println("---", bytes); 
+        Utility.println("---", bytes);
         Serializable[] a = convert.convertFrom(Serializable[].class, bytes);
         System.out.println(Arrays.toString(a));
+        Two.main(args); 
         main2(args);
         main3(args);
         main4(args);
+        main5(args);
+        main6(args);
     }
 
     public static void main2(String[] args) throws Exception {
@@ -85,5 +89,32 @@ public class BsonTestMain {
         SimpleEntity rs = convert.convertFrom(SimpleEntity.class, new ByteArrayInputStream(bytes));
         System.out.println(rs.toString());
 
+    }
+
+    public static void main5(String[] args) throws Exception {
+        final BsonConvert convert = BsonFactory.root().getConvert();
+
+        LinkedHashMap map = new LinkedHashMap();
+        map.put("1", 1);
+        map.put("2", "a2");
+        byte[] bs = convert.convertTo(Object.class, map);
+        Object mapobj = convert.convertFrom(Object.class, bs);
+        System.out.println(mapobj);
+    }
+
+    public static void main6(String[] args) throws Exception {
+        final BsonConvert convert = BsonFactory.root().getConvert();
+
+        Optional<String> val = Optional.ofNullable("haha");
+        byte[] bs = convert.convertTo(val);
+        Object obj = convert.convertFrom(Optional.class, bs);
+        System.out.println(obj);
+        bs = convert.convertTo(Object.class, val);
+        obj = convert.convertFrom(Object.class, bs);
+        System.out.println(obj);
+        bs = convert.convertTo(new TypeToken<Optional<String>>(){}.getType(), val);
+        obj = convert.convertFrom(new TypeToken<Optional<String>>(){}.getType(), bs);
+        System.out.println(obj);
+        System.out.println(JsonConvert.root().convertTo(val)); 
     }
 }

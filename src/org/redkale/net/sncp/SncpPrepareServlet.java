@@ -8,57 +8,69 @@ package org.redkale.net.sncp;
 import org.redkale.net.PrepareServlet;
 import org.redkale.util.AnyValue;
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.util.*;
+import org.redkale.service.Service;
 import org.redkale.util.*;
 
 /**
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  */
 public class SncpPrepareServlet extends PrepareServlet<DLong, SncpContext, SncpRequest, SncpResponse, SncpServlet> {
 
-    private static final ByteBuffer pongBuffer = ByteBuffer.wrap("PONG".getBytes()).asReadOnlyBuffer();
+    private final Object sncplock = new Object();
+
 
     @Override
     public void addServlet(SncpServlet servlet, Object attachment, AnyValue conf, DLong... mappings) {
-        addServlet((SncpServlet) servlet, conf);
-    }
-
-    public void addServlet(SncpServlet servlet, AnyValue conf) {
-        setServletConf(servlet, conf);
-        synchronized (mappings) {
-            mappings.put(servlet.getServiceid(), servlet);
-            servlets.add(servlet);
+        synchronized (sncplock) {
+            for (SncpServlet s : getServlets()) {
+                if (s.service == servlet.service) throw new RuntimeException(s.service + " repeat addSncpServlet");
+            }
+            setServletConf(servlet, conf);
+            putMapping(servlet.getServiceid(), servlet);
+            putServlet(servlet);
         }
     }
 
-    public List<SncpServlet> getSncpServlets() {
-        ArrayList<SncpServlet> list = new ArrayList<>(servlets.size());
-        servlets.forEach(x -> list.add((SncpServlet) x));
-        return list;
+    public <T> SncpServlet removeSncpServlet(Service service) {
+        SncpServlet rs = null;
+        synchronized (sncplock) {
+            for (SncpServlet servlet : getServlets()) {
+                if (servlet.service == service) {
+                    rs = servlet;
+                    break;
+                }
+            }
+            if (rs != null) {
+                removeMapping(rs);
+                removeServlet(rs);
+            }
+        }
+        return rs;
     }
 
     @Override
     public void init(SncpContext context, AnyValue config) {
-        servlets.forEach(s -> s.init(context, getServletConf(s)));
+        super.init(context, config); //必须要执行
+        getServlets().forEach(s -> s.init(context, getServletConf(s)));
     }
 
     @Override
     public void destroy(SncpContext context, AnyValue config) {
-        servlets.forEach(s -> s.destroy(context, getServletConf(s)));
+        super.destroy(context, config); //必须要执行
+        getServlets().forEach(s -> s.destroy(context, getServletConf(s)));
     }
 
     @Override
     public void execute(SncpRequest request, SncpResponse response) throws IOException {
         if (request.isPing()) {
-            response.finish(pongBuffer.duplicate());
+            response.finish(Sncp.PONG_BUFFER.duplicate());
             return;
         }
-        SncpServlet servlet = (SncpServlet) mappings.get(request.getServiceid());
+        SncpServlet servlet = (SncpServlet) mappingServlet(request.getServiceid());
         if (servlet == null) {
             response.finish(SncpResponse.RETCODE_ILLSERVICEID, null);  //无效serviceid
         } else {

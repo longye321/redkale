@@ -10,6 +10,8 @@ import org.redkale.convert.*;
 
 /**
  *
+ * 详情见: https://redkale.org
+ *
  * @author zhangjx
  */
 class JsonStreamReader extends JsonByteBufferReader {
@@ -17,6 +19,7 @@ class JsonStreamReader extends JsonByteBufferReader {
     private InputStream in;
 
     protected JsonStreamReader(InputStream in) {
+        super((ConvertMask) null);
         this.in = in;
     }
 

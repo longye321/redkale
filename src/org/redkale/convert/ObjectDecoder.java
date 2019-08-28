@@ -7,22 +7,21 @@ package org.redkale.convert;
 
 import org.redkale.util.Creator;
 import java.lang.reflect.*;
-import java.util.Arrays;
-import java.util.HashSet;
-import java.util.Set;
+import java.util.*;
 import org.redkale.util.*;
 
 /**
+ * 自定义对象的反序列化操作类
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  * @param <R> Reader输入的子类
  * @param <T> 反解析的数据类型
  */
 @SuppressWarnings("unchecked")
-public final class ObjectDecoder<R extends Reader, T> implements Decodeable<R, T> {
+public class ObjectDecoder<R extends Reader, T> implements Decodeable<R, T> {
 
     protected final Type type;
 
@@ -30,21 +29,29 @@ public final class ObjectDecoder<R extends Reader, T> implements Decodeable<R, T
 
     protected Creator<T> creator;
 
-    protected DeMember<R, T, ?>[] creatorConstructorMembers;
+    protected DeMember<R, T, ?>[] creatorConstructorMembers = new DeMember[0];
 
-    protected DeMember<R, T, ?>[] members;
+    protected DeMember[] members;
 
     protected ConvertFactory factory;
 
-    private boolean inited = false;
+    protected volatile boolean inited = false;
 
-    private final Object lock = new Object();
+    protected final Object lock = new Object();
 
     protected ObjectDecoder(Type type) {
         this.type = ((type instanceof Class) && ((Class) type).isInterface()) ? Object.class : type;
         if (type instanceof ParameterizedType) {
             final ParameterizedType pt = (ParameterizedType) type;
             this.typeClass = (Class) pt.getRawType();
+        } else if (type instanceof TypeVariable) {
+            TypeVariable tv = (TypeVariable) type;
+            Type[] ts = tv.getBounds();
+            if (ts.length == 1 && ts[0] instanceof Class) {
+                this.typeClass = (Class) ts[0];
+            } else {
+                throw new ConvertException("[" + type + "] is no a class or ParameterizedType");
+            }
         } else {
             this.typeClass = (Class) type;
         }
@@ -54,29 +61,49 @@ public final class ObjectDecoder<R extends Reader, T> implements Decodeable<R, T
     public void init(final ConvertFactory factory) {
         this.factory = factory;
         try {
-            if (type == Object.class) return;
+            if (type == Object.class) {
+                this.creatorConstructorMembers = null;
+                return;
+            }
 
             Class clazz = null;
             if (type instanceof ParameterizedType) {
                 final ParameterizedType pts = (ParameterizedType) type;
                 clazz = (Class) (pts).getRawType();
+            } else if (type instanceof TypeVariable) {
+                TypeVariable tv = (TypeVariable) type;
+                Type[] ts = tv.getBounds();
+                if (ts.length == 1 && ts[0] instanceof Class) {
+                    clazz = (Class) ts[0];
+                } else {
+                    throw new ConvertException("[" + type + "] is no a class or TypeVariable");
+                }
             } else if (!(type instanceof Class)) {
                 throw new ConvertException("[" + type + "] is no a class");
             } else {
                 clazz = (Class) type;
             }
-            this.creator = factory.loadCreator(clazz);
-
-            final Set<DeMember> list = new HashSet();
+            if (!clazz.isInterface() && !Modifier.isAbstract(clazz.getModifiers())) {
+                this.creator = factory.loadCreator(clazz);
+                if (this.creator == null) throw new ConvertException("Cannot create a creator for " + clazz);
+            }
+            final Set<DeMember> list = new LinkedHashSet();
             final String[] cps = ObjectEncoder.findConstructorProperties(this.creator);
             try {
                 ConvertColumnEntry ref;
                 for (final Field field : clazz.getFields()) {
                     if (Modifier.isStatic(field.getModifiers())) continue;
-                    ref = factory.findRef(field);
+                    if (factory.isConvertDisabled(field)) continue;
+                    ref = factory.findRef(clazz, field);
                     if (ref != null && ref.ignore()) continue;
-                    Type t = ObjectEncoder.createClassType(field.getGenericType(), this.type);
-                    list.add(new DeMember(ObjectEncoder.createAttribute(factory, clazz, field, null, null), factory.loadDecoder(t)));
+                    Decodeable<R, ?> fieldCoder = factory.findFieldCoder(clazz, field.getName());
+                    if (fieldCoder == null) {
+                        Type t = TypeToken.createClassType(TypeToken.getGenericType(field.getGenericType(), this.type), this.type);
+                        fieldCoder = factory.loadDecoder(t);
+                    }
+                    DeMember member = new DeMember(ObjectEncoder.createAttribute(factory, clazz, field, null, null), fieldCoder);
+                    if (ref != null) member.index = ref.getIndex();
+                    list.add(member);
                 }
                 final boolean reversible = factory.isReversible();
                 for (final Method method : clazz.getMethods()) {
@@ -85,6 +112,7 @@ public final class ObjectDecoder<R extends Reader, T> implements Decodeable<R, T
                     if (method.isSynthetic()) continue;
                     if (method.getName().length() < 4) continue;
                     if (!method.getName().startsWith("set")) continue;
+                    if (factory.isConvertDisabled(method)) continue;
                     if (method.getParameterTypes().length != 1) continue;
                     if (method.getReturnType() != void.class) continue;
                     if (reversible && (cps == null || !ObjectEncoder.contains(cps, ConvertFactory.readGetSetFieldName(method)))) {
@@ -95,10 +123,17 @@ public final class ObjectDecoder<R extends Reader, T> implements Decodeable<R, T
                             continue;
                         }
                     }
-                    ref = factory.findRef(method);
+                    ref = factory.findRef(clazz, method);
                     if (ref != null && ref.ignore()) continue;
-                    Type t = ObjectEncoder.createClassType(method.getGenericParameterTypes()[0], this.type);
-                    list.add(new DeMember(ObjectEncoder.createAttribute(factory, clazz, null, null, method), factory.loadDecoder(t)));
+
+                    Decodeable<R, ?> fieldCoder = factory.findFieldCoder(clazz, ConvertFactory.readGetSetFieldName(method));
+                    if (fieldCoder == null) {
+                        Type t = TypeToken.createClassType(TypeToken.getGenericType(method.getGenericParameterTypes()[0], this.type), this.type);
+                        fieldCoder = factory.loadDecoder(t);
+                    }
+                    DeMember member = new DeMember(ObjectEncoder.createAttribute(factory, clazz, null, null, method), fieldCoder);
+                    if (ref != null) member.index = ref.getIndex();
+                    list.add(member);
                 }
                 if (cps != null) { //可能存在某些构造函数中的字段名不存在setter方法
                     for (final String constructorField : cps) {
@@ -113,7 +148,7 @@ public final class ObjectDecoder<R extends Reader, T> implements Decodeable<R, T
                         //不存在setter方法
                         try {
                             Field f = clazz.getDeclaredField(constructorField);
-                            Type t = ObjectEncoder.createClassType(f.getGenericType(), this.type);
+                            Type t = TypeToken.createClassType(f.getGenericType(), this.type);
                             list.add(new DeMember(ObjectEncoder.createAttribute(factory, clazz, f, null, null), factory.loadDecoder(t)));
                         } catch (NoSuchFieldException nsfe) { //不存在field， 可能存在getter方法
                             char[] fs = constructorField.toCharArray();
@@ -125,13 +160,26 @@ public final class ObjectDecoder<R extends Reader, T> implements Decodeable<R, T
                             } catch (NoSuchMethodException ex) {
                                 getter = clazz.getMethod("is" + mn);
                             }
-                            Type t = ObjectEncoder.createClassType(getter.getGenericParameterTypes()[0], this.type);
+                            Type t = TypeToken.createClassType(TypeToken.getGenericType(getter.getGenericParameterTypes()[0], this.type), this.type);
                             list.add(new DeMember(ObjectEncoder.createAttribute(factory, clazz, null, getter, null), factory.loadDecoder(t)));
                         }
                     }
                 }
                 this.members = list.toArray(new DeMember[list.size()]);
-                Arrays.sort(this.members);
+                Arrays.sort(this.members, (a, b) -> a.compareTo(factory.isFieldSort(), b));
+                Set<Integer> pos = new HashSet<>();
+                for (int i = 0; i < this.members.length; i++) {
+                    if (this.members[i].index > 0) pos.add(this.members[i].index);
+                }
+                int pidx = 0;
+                for (DeMember member : this.members) {
+                    if (member.index > 0) {
+                        member.position = member.index;
+                    } else {
+                        while (pos.contains(++pidx));
+                        member.position = pidx;
+                    }
+                }
 
                 if (cps != null) {
                     final String[] fields = cps;
@@ -161,10 +209,11 @@ public final class ObjectDecoder<R extends Reader, T> implements Decodeable<R, T
      * 对象格式: [0x1][short字段个数][字段名][字段值]...[0x2]
      *
      * @param in 输入流
+     *
      * @return 反解析后的对象结果
      */
     @Override
-    public final T convertFrom(final R in) {
+    public T convertFrom(final R in) {
         final String clazz = in.readObjectB(typeClass);
         if (clazz == null) return null;
         if (!clazz.isEmpty()) return (T) factory.loadDecoder(factory.getEntityAlias(clazz)).convertFrom(in);
@@ -177,16 +226,23 @@ public final class ObjectDecoder<R extends Reader, T> implements Decodeable<R, T
                 }
             }
         }
+        if (this.creator == null) {
+            if (typeClass.isInterface() || Modifier.isAbstract(typeClass.getModifiers())) {
+                throw new ConvertException("[" + typeClass + "] is a interface or abstract class, cannot create it's Creator.");
+            }
+        }
         if (this.creatorConstructorMembers == null) {  //空构造函数
-            final T result = this.creator.create();
-            while (in.hasNext()) {
+            final T result = this.creator == null ? null : this.creator.create();
+            boolean first = true;
+            while (hasNext(in, first)) {
                 DeMember member = in.readFieldName(members);
                 in.readBlank();
                 if (member == null) {
                     in.skipValue(); //跳过不存在的属性的值
                 } else {
-                    member.read(in, result);
+                    readMemberValue(in, member, result, first);
                 }
+                first = false;
             }
             in.readObjectE(typeClass);
             return result;
@@ -195,13 +251,14 @@ public final class ObjectDecoder<R extends Reader, T> implements Decodeable<R, T
             final Object[] constructorParams = new Object[fields.length];
             final Object[][] otherParams = new Object[this.members.length][2];
             int oc = 0;
-            while (in.hasNext()) {
+            boolean first = true;
+            while (hasNext(in, first)) {
                 DeMember member = in.readFieldName(members);
                 in.readBlank();
                 if (member == null) {
                     in.skipValue(); //跳过不存在的属性的值
                 } else {
-                    Object val = member.read(in);
+                    Object val = readMemberValue(in, member, first);
                     boolean flag = true;
                     for (int i = 0; i < fields.length; i++) {
                         if (member == fields[i]) {
@@ -211,9 +268,12 @@ public final class ObjectDecoder<R extends Reader, T> implements Decodeable<R, T
                         }
                     }
                     if (flag) otherParams[oc++] = new Object[]{member.attribute, val};
+
                 }
+                first = false;
             }
             in.readObjectE(typeClass);
+            if (this.creator == null) return null;
             final T result = this.creator.create(constructorParams);
             for (int i = 0; i < oc; i++) {
                 ((Attribute) otherParams[i][0]).set(result, otherParams[i][1]);
@@ -222,9 +282,25 @@ public final class ObjectDecoder<R extends Reader, T> implements Decodeable<R, T
         }
     }
 
+    protected boolean hasNext(R in, boolean first) {
+        return in.hasNext();
+    }
+
+    protected Object readMemberValue(R in, DeMember member, boolean first) {
+        return member.read(in);
+    }
+
+    protected void readMemberValue(R in, DeMember member, T result, boolean first) {
+        member.read(in, result);
+    }
+
     @Override
-    public final Type getType() {
+    public Type getType() {
         return this.type;
+    }
+
+    public DeMember[] getMembers() {
+        return Arrays.copyOf(members, members.length);
     }
 
     @Override

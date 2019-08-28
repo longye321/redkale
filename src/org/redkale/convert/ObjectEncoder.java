@@ -10,16 +10,17 @@ import java.util.*;
 import org.redkale.util.*;
 
 /**
+ * 自定义对象的序列化操作类
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  * @param <W> Writer输出的子类
  * @param <T> 序列化的数据类型
  */
 @SuppressWarnings("unchecked")
-public final class ObjectEncoder<W extends Writer, T> implements Encodeable<W, T> {
+public class ObjectEncoder<W extends Writer, T> implements Encodeable<W, T> {
 
     static final Type[] TYPEZERO = new Type[0];
 
@@ -31,15 +32,23 @@ public final class ObjectEncoder<W extends Writer, T> implements Encodeable<W, T
 
     protected ConvertFactory factory;
 
-    private boolean inited = false;
+    protected volatile boolean inited = false;
 
-    private final Object lock = new Object();
+    protected final Object lock = new Object();
 
     protected ObjectEncoder(Type type) {
         this.type = type;
         if (type instanceof ParameterizedType) {
             final ParameterizedType pt = (ParameterizedType) type;
             this.typeClass = (Class) pt.getRawType();
+        } else if (type instanceof TypeVariable) {
+            TypeVariable tv = (TypeVariable) type;
+            Type[] ts = tv.getBounds();
+            if (ts.length == 1 && ts[0] instanceof Class) {
+                this.typeClass = (Class) ts[0];
+            } else {
+                throw new ConvertException("[" + type + "] is no a class or ParameterizedType");
+            }
         } else {
             this.typeClass = (Class) type;
         }
@@ -52,7 +61,7 @@ public final class ObjectEncoder<W extends Writer, T> implements Encodeable<W, T
             if (type == Object.class) return;
             //if (!(type instanceof Class)) throw new ConvertException("[" + type + "] is no a class");
             final Class clazz = this.typeClass;
-            final Set<EnMember> list = new HashSet();
+            final Set<EnMember> list = new LinkedHashSet();
             final boolean reversible = factory.isReversible();
             Creator creator = null;
             try {
@@ -65,10 +74,17 @@ public final class ObjectEncoder<W extends Writer, T> implements Encodeable<W, T
                 ConvertColumnEntry ref;
                 for (final Field field : clazz.getFields()) {
                     if (Modifier.isStatic(field.getModifiers())) continue;
-                    ref = factory.findRef(field);
+                    if (factory.isConvertDisabled(field)) continue;
+                    ref = factory.findRef(clazz, field);
                     if (ref != null && ref.ignore()) continue;
-                    Type t = createClassType(field.getGenericType(), this.type);
-                    list.add(new EnMember(createAttribute(factory, clazz, field, null, null), factory.loadEncoder(t)));
+                    Encodeable<W, ?> fieldCoder = factory.findFieldCoder(clazz, field.getName());
+                    if (fieldCoder == null) {
+                        Type t = TypeToken.createClassType(TypeToken.getGenericType(field.getGenericType(), this.type), this.type);
+                        fieldCoder = factory.loadEncoder(t);
+                    }
+                    EnMember member = new EnMember(createAttribute(factory, clazz, field, null, null), fieldCoder);
+                    if (ref != null) member.index = ref.getIndex();
+                    list.add(member);
                 }
                 for (final Method method : clazz.getMethods()) {
                     if (Modifier.isStatic(method.getModifiers())) continue;
@@ -77,6 +93,7 @@ public final class ObjectEncoder<W extends Writer, T> implements Encodeable<W, T
                     if (method.getName().length() < 3) continue;
                     if (method.getName().equals("getClass")) continue;
                     if (!method.getName().startsWith("is") && !method.getName().startsWith("get")) continue;
+                    if (factory.isConvertDisabled(method)) continue;
                     if (method.getParameterTypes().length != 0) continue;
                     if (method.getReturnType() == void.class) continue;
                     if (reversible && (cps == null || !contains(cps, ConvertFactory.readGetSetFieldName(method)))) {
@@ -87,13 +104,32 @@ public final class ObjectEncoder<W extends Writer, T> implements Encodeable<W, T
                             continue;
                         }
                     }
-                    ref = factory.findRef(method);
+                    ref = factory.findRef(clazz, method);
                     if (ref != null && ref.ignore()) continue;
-                    Type t = createClassType(method.getGenericReturnType(), this.type);
-                    list.add(new EnMember(createAttribute(factory, clazz, null, method, null), factory.loadEncoder(t)));
+                    Encodeable<W, ?> fieldCoder = factory.findFieldCoder(clazz, ConvertFactory.readGetSetFieldName(method));
+                    if (fieldCoder == null) {
+                        Type t = TypeToken.createClassType(TypeToken.getGenericType(method.getGenericReturnType(), this.type), this.type);
+                        fieldCoder = factory.loadEncoder(t);
+                    }
+                    EnMember member = new EnMember(createAttribute(factory, clazz, null, method, null), fieldCoder);
+                    if (ref != null) member.index = ref.getIndex();
+                    list.add(member);
                 }
                 this.members = list.toArray(new EnMember[list.size()]);
-                Arrays.sort(this.members);
+                Arrays.sort(this.members, (a, b) -> a.compareTo(factory.isFieldSort(), b));
+                Set<Integer> pos = new HashSet<>();
+                for (int i = 0; i < this.members.length; i++) {
+                    if (this.members[i].index > 0) pos.add(this.members[i].index);
+                }
+                int pidx = 0;
+                for (EnMember member : this.members) {
+                    if (member.index > 0) {
+                        member.position = member.index;
+                    } else {
+                        while (pos.contains(++pidx));
+                        member.position = pidx;
+                    }
+                }
 
             } catch (Exception ex) {
                 throw new ConvertException(ex);
@@ -107,7 +143,7 @@ public final class ObjectEncoder<W extends Writer, T> implements Encodeable<W, T
     }
 
     @Override
-    public final void convertTo(W out, T value) {
+    public void convertTo(W out, T value) {
         if (value == null) {
             out.writeObjectNull(null);
             return;
@@ -121,22 +157,27 @@ public final class ObjectEncoder<W extends Writer, T> implements Encodeable<W, T
                 }
             }
         }
-        if (value != null && value.getClass() != this.typeClass) {
+        if (value.getClass() != this.typeClass && !this.type.equals(out.specify())) {
             final Class clz = value.getClass();
             if (out.needWriteClassName()) out.writeClassName(factory.getEntityAlias(clz));
             factory.loadEncoder(clz).convertTo(out, value);
             return;
         }
-        out.writeObjectB(value);
-        for (EnMember member : members) {
-            out.writeObjectField(member, value);
+        if (out.writeObjectB(value) < 0) {
+            for (EnMember member : members) {
+                out.writeObjectField(member, value);
+            }
         }
         out.writeObjectE(value);
     }
 
     @Override
-    public final Type getType() {
+    public Type getType() {
         return this.type;
+    }
+
+    public EnMember[] getMembers() {
+        return Arrays.copyOf(members, members.length);
     }
 
     @Override
@@ -144,42 +185,6 @@ public final class ObjectEncoder<W extends Writer, T> implements Encodeable<W, T
         return "ObjectEncoder{" + "type=" + type + ", members=" + Arrays.toString(members) + '}';
     }
 
-    static Type createClassType(final Type type, final Type declaringType0) {
-        if (TypeToken.isClassType(type)) return type;
-        if (type instanceof ParameterizedType) {  // e.g. Map<String, String>
-            final ParameterizedType pt = (ParameterizedType) type;
-            final Type[] paramTypes = pt.getActualTypeArguments();
-            for (int i = 0; i < paramTypes.length; i++) {
-                paramTypes[i] = createClassType(paramTypes[i], declaringType0);
-            }
-            return TypeToken.createParameterizedType(pt.getOwnerType(), pt.getRawType(), paramTypes);
-        }
-        Type declaringType = declaringType0;
-        if (declaringType instanceof Class) {
-            do {
-                declaringType = ((Class) declaringType).getGenericSuperclass();
-                if (declaringType == Object.class) return Object.class;
-            } while (declaringType instanceof Class);
-        }
-        //存在通配符则declaringType 必须是 ParameterizedType
-        if (!(declaringType instanceof ParameterizedType)) return Object.class;
-        final ParameterizedType declaringPType = (ParameterizedType) declaringType;
-        final Type[] virTypes = ((Class) declaringPType.getRawType()).getTypeParameters();
-        final Type[] desTypes = declaringPType.getActualTypeArguments();
-        if (type instanceof WildcardType) {   // e.g. <? extends Serializable>
-            final WildcardType wt = (WildcardType) type;
-            for (Type f : wt.getUpperBounds()) {
-                for (int i = 0; i < virTypes.length; i++) {
-                    if (virTypes[i].equals(f)) return desTypes.length <= i ? Object.class : desTypes[i];
-                }
-            }
-        } else if (type instanceof TypeVariable) { // e.g.  <? extends E>
-            for (int i = 0; i < virTypes.length; i++) {
-                if (virTypes[i].equals(type)) return desTypes.length <= i ? Object.class : desTypes[i];
-            }
-        }
-        return type;
-    }
 //
 //    static Type makeGenericType(final Type type, final Type[] virGenericTypes, final Type[] realGenericTypes) {
 //        if (type instanceof Class) {  //e.g. String
@@ -228,7 +233,6 @@ public final class ObjectEncoder<W extends Writer, T> implements Encodeable<W, T
 //        }
 //        return type;
 //    }
-
     static boolean contains(String[] values, String value) {
         for (String str : values) {
             if (str.equals(value)) return true;
@@ -237,8 +241,9 @@ public final class ObjectEncoder<W extends Writer, T> implements Encodeable<W, T
     }
 
     static String[] findConstructorProperties(Creator creator) {
+        if (creator == null) return null;
         try {
-            Creator.ConstructorParameters cps = creator.getClass().getMethod("create", Object[].class).getAnnotation(Creator.ConstructorParameters.class);
+            ConstructorParameters cps = creator.getClass().getMethod("create", Object[].class).getAnnotation(ConstructorParameters.class);
             return cps == null ? null : cps.value();
         } catch (Exception e) {
             return null;
@@ -248,24 +253,24 @@ public final class ObjectEncoder<W extends Writer, T> implements Encodeable<W, T
     static Attribute createAttribute(final ConvertFactory factory, Class clazz, final Field field, final Method getter, final Method setter) {
         String fieldalias;
         if (field != null) { // public field
-            ConvertColumnEntry ref = factory.findRef(field);
+            ConvertColumnEntry ref = factory.findRef(clazz, field);
             fieldalias = ref == null || ref.name().isEmpty() ? field.getName() : ref.name();
         } else if (getter != null) {
-            ConvertColumnEntry ref = factory.findRef(getter);
+            ConvertColumnEntry ref = factory.findRef(clazz, getter);
             String mfieldname = ConvertFactory.readGetSetFieldName(getter);
             if (ref == null) {
                 try {
-                    ref = factory.findRef(clazz.getDeclaredField(mfieldname));
+                    ref = factory.findRef(clazz, clazz.getDeclaredField(mfieldname));
                 } catch (Exception e) {
                 }
             }
             fieldalias = ref == null || ref.name().isEmpty() ? mfieldname : ref.name();
         } else { // setter != null
-            ConvertColumnEntry ref = factory.findRef(setter);
+            ConvertColumnEntry ref = factory.findRef(clazz, setter);
             String mfieldname = ConvertFactory.readGetSetFieldName(setter);
             if (ref == null) {
                 try {
-                    ref = factory.findRef(clazz.getDeclaredField(mfieldname));
+                    ref = factory.findRef(clazz, clazz.getDeclaredField(mfieldname));
                 } catch (Exception e) {
                 }
             }

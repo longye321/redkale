@@ -7,6 +7,7 @@ package org.redkale.net.sncp;
 
 import java.net.*;
 import java.nio.*;
+import java.util.logging.Level;
 import org.redkale.convert.bson.*;
 import org.redkale.net.*;
 import org.redkale.util.*;
@@ -14,19 +15,21 @@ import org.redkale.util.*;
 /**
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  */
 public final class SncpRequest extends Request<SncpContext> {
 
-    public static final int HEADER_SIZE = 56;
+    public static final int HEADER_SIZE = 60;
 
     public static final byte[] DEFAULT_HEADER = new byte[HEADER_SIZE];
 
     protected final BsonConvert convert;
 
     private long seqid;
+
+    private int serviceversion;
 
     private DLong serviceid;
 
@@ -42,30 +45,36 @@ public final class SncpRequest extends Request<SncpContext> {
 
     private byte[] bufferbytes = new byte[6];
 
-    protected SncpRequest(SncpContext context) {
-        super(context);
+    protected SncpRequest(SncpContext context, ObjectPool<ByteBuffer> bufferPool) {
+        super(context, bufferPool);
         this.convert = context.getBsonConvert();
+    }
+
+    protected ObjectPool<ByteBuffer> getBufferPool() {
+        return this.bufferPool;
     }
 
     @Override
     protected int readHeader(ByteBuffer buffer) {
         if (buffer.remaining() < HEADER_SIZE) {
+            if (buffer.hasRemaining()) buffer.get(new byte[buffer.remaining()]);
             this.ping = true;
             return 0;
         }
         //---------------------head----------------------------------
         this.seqid = buffer.getLong();
         if (buffer.getChar() != HEADER_SIZE) {
-            context.getLogger().finest("sncp buffer header.length not " + HEADER_SIZE);
+            if (context.getLogger().isLoggable(Level.FINEST)) context.getLogger().finest("sncp buffer header.length not " + HEADER_SIZE);
             return -1;
         }
         this.serviceid = DLong.read(buffer);
+        this.serviceversion = buffer.getInt();
         this.actionid = DLong.read(buffer);
         buffer.get(bufferbytes);
         this.bodylength = buffer.getInt();
 
         if (buffer.getInt() != 0) {
-            context.getLogger().finest("sncp buffer header.retcode not 0");
+            if (context.getLogger().isLoggable(Level.FINEST)) context.getLogger().finest("sncp buffer header.retcode not 0");
             return -1;
         }
         //---------------------body----------------------------------
@@ -92,15 +101,16 @@ public final class SncpRequest extends Request<SncpContext> {
     @Override
     public String toString() {
         return SncpRequest.class.getSimpleName() + "{seqid=" + this.seqid
-                + ",serviceid=" + this.serviceid + ",actionid=" + this.actionid
-                + ",bodylength=" + this.bodylength + ",bodyoffset=" + this.bodyoffset
-                + ",remoteAddress=" + getRemoteAddress() + "}";
+            + ",serviceversion=" + this.serviceversion + ",serviceid=" + this.serviceid
+            + ",actionid=" + this.actionid + ",bodylength=" + this.bodylength
+            + ",bodyoffset=" + this.bodyoffset + ",remoteAddress=" + getRemoteAddress() + "}";
     }
 
     @Override
     protected void recycle() {
         this.seqid = 0;
         this.serviceid = null;
+        this.serviceversion = 0;
         this.actionid = null;
         this.bodylength = 0;
         this.bodyoffset = 0;
@@ -122,6 +132,10 @@ public final class SncpRequest extends Request<SncpContext> {
         return seqid;
     }
 
+    public int getServiceversion() {
+        return serviceversion;
+    }
+
     public DLong getServiceid() {
         return serviceid;
     }
@@ -133,7 +147,7 @@ public final class SncpRequest extends Request<SncpContext> {
     public InetSocketAddress getRemoteAddress() {
         if (bufferbytes[0] == 0) return null;
         return new InetSocketAddress((0xff & bufferbytes[0]) + "." + (0xff & bufferbytes[1]) + "." + (0xff & bufferbytes[2]) + "." + (0xff & bufferbytes[3]),
-                ((0xff00 & (bufferbytes[4] << 8)) | (0xff & bufferbytes[5])));
+            ((0xff00 & (bufferbytes[4] << 8)) | (0xff & bufferbytes[5])));
     }
 
 }

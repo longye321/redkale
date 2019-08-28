@@ -5,6 +5,7 @@
  */
 package org.redkale.convert.ext;
 
+import java.util.stream.LongStream;
 import org.redkale.convert.Reader;
 import org.redkale.convert.SimpledCoder;
 import org.redkale.convert.Writer;
@@ -13,7 +14,7 @@ import org.redkale.convert.Writer;
  * long[] 的SimpledCoder实现
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  * @param <R> Reader输入的子类型
@@ -29,24 +30,31 @@ public final class LongArraySimpledCoder<R extends Reader, W extends Writer> ext
             out.writeNull();
             return;
         }
-        out.writeArrayB(values.length);
-        boolean flag = false;
-        for (long v : values) {
-            if (flag) out.writeArrayMark();
-            out.writeLong(v);
-            flag = true;
+        if (out.writeArrayB(values.length, LongSimpledCoder.instance, values) < 0) {
+            boolean flag = false;
+            for (long v : values) {
+                if (flag) out.writeArrayMark();
+                out.writeLong(v);
+                flag = true;
+            }
         }
         out.writeArrayE();
     }
 
     @Override
     public long[] convertFrom(R in) {
-        int len = in.readArrayB();
+        int len = in.readArrayB(null, null, LongSimpledCoder.instance);
+        int contentLength = -1;
         if (len == Reader.SIGN_NULL) return null;
+        if (len == Reader.SIGN_NOLENBUTBYTES) {
+            contentLength = in.readMemberContentLength(null, LongSimpledCoder.instance);
+            len = Reader.SIGN_NOLENGTH;
+        }
         if (len == Reader.SIGN_NOLENGTH) {
             int size = 0;
             long[] data = new long[8];
-            while (in.hasNext()) {
+            int startPosition = in.position();
+            while (in.hasNext(startPosition, contentLength)) {
                 if (size >= data.length) {
                     long[] newdata = new long[data.length + 4];
                     System.arraycopy(data, 0, newdata, 0, size);
@@ -68,4 +76,26 @@ public final class LongArraySimpledCoder<R extends Reader, W extends Writer> ext
         }
     }
 
+    public final static class LongStreamSimpledCoder<R extends Reader, W extends Writer> extends SimpledCoder<R, W, LongStream> {
+
+        public static final LongStreamSimpledCoder instance = new LongStreamSimpledCoder();
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public void convertTo(W out, LongStream values) {
+            if (values == null) {
+                out.writeNull();
+                return;
+            }
+            LongArraySimpledCoder.instance.convertTo(out, values.toArray());
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public LongStream convertFrom(R in) {
+            long[] value = LongArraySimpledCoder.instance.convertFrom(in);
+            return value == null ? null : LongStream.of(value);
+        }
+
+    }
 }

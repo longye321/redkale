@@ -10,56 +10,106 @@ import java.lang.reflect.Type;
 import java.util.Map;
 
 /**
+ * Map的序列化操作类
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  * @param <K> Map key的数据类型
  * @param <V> Map value的数据类型
  */
 @SuppressWarnings("unchecked")
-public final class MapEncoder<K, V> implements Encodeable<Writer, Map<K, V>> {
+public class MapEncoder<K, V> implements Encodeable<Writer, Map<K, V>> {
 
-    private final Type type;
+    protected final Type type;
 
-    private final Encodeable<Writer, K> keyencoder;
+    protected final Encodeable<Writer, K> keyEncoder;
 
-    private final Encodeable<Writer, V> valencoder;
+    protected final Encodeable<Writer, V> valueEncoder;
+
+    protected volatile boolean inited = false;
+
+    protected final Object lock = new Object();
 
     public MapEncoder(final ConvertFactory factory, final Type type) {
         this.type = type;
-        if (type instanceof ParameterizedType) {
-            final Type[] pt = ((ParameterizedType) type).getActualTypeArguments();
-            this.keyencoder = factory.loadEncoder(pt[0]);
-            this.valencoder = factory.loadEncoder(pt[1]);
-        } else {
-            this.keyencoder = factory.getAnyEncoder();
-            this.valencoder = factory.getAnyEncoder();
+        try {
+            if (type instanceof ParameterizedType) {
+                final Type[] pt = ((ParameterizedType) type).getActualTypeArguments();
+                this.keyEncoder = factory.loadEncoder(pt[0]);
+                this.valueEncoder = factory.loadEncoder(pt[1]);
+            } else {
+                this.keyEncoder = factory.getAnyEncoder();
+                this.valueEncoder = factory.getAnyEncoder();
+            }
+        } finally {
+            inited = true;
+            synchronized (lock) {
+                lock.notifyAll();
+            }
         }
     }
 
     @Override
     public void convertTo(Writer out, Map<K, V> value) {
+        convertTo(out, null, value);
+    }
+
+    public void convertTo(Writer out, EnMember member, Map<K, V> value) {
         final Map<K, V> values = value;
         if (values == null) {
             out.writeNull();
             return;
         }
-        out.writeMapB(values.size());
-        boolean first = true;
-        for (Map.Entry<K, V> en : values.entrySet()) {
-            if (!first) out.writeArrayMark();
-            this.keyencoder.convertTo(out, en.getKey());
-            out.writeMapMark();
-            this.valencoder.convertTo(out, en.getValue());
-            if (first) first = false;
+
+        if (this.keyEncoder == null || this.valueEncoder == null) {
+            if (!this.inited) {
+                synchronized (lock) {
+                    try {
+                        lock.wait();
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                }
+            }
+        }
+        if (out.writeMapB(values.size(), (Encodeable) keyEncoder, (Encodeable) valueEncoder, value) < 0) {
+            boolean first = true;
+            for (Map.Entry<K, V> en : values.entrySet()) {
+                if (!first) out.writeArrayMark();
+                writeMemberValue(out, member, en.getKey(), en.getValue(), first);
+                if (first) first = false;
+            }
         }
         out.writeMapE();
+    }
+
+    protected void writeMemberValue(Writer out, EnMember member, K key, V value, boolean first) {
+        keyEncoder.convertTo(out, key);
+        out.writeMapMark();
+        valueEncoder.convertTo(out, value);
     }
 
     @Override
     public Type getType() {
         return type;
     }
+
+    public Type getKeyType() {
+        return keyEncoder == null ? null : keyEncoder.getType();
+    }
+
+    public Type getValueType() {
+        return valueEncoder == null ? null : valueEncoder.getType();
+    }
+
+    public Encodeable<Writer, K> getKeyEncoder() {
+        return keyEncoder;
+    }
+
+    public Encodeable<Writer, V> getValueEncoder() {
+        return valueEncoder;
+    }
+
 }

@@ -8,10 +8,14 @@ package org.redkale.convert;
 /**
  * ConvertColumn 对应的实体类
  *
- * <p> 详情见: http://redkale.org
+ * <p>
+ * 详情见: https://redkale.org
+ *
  * @author zhangjx
  */
 public final class ConvertColumnEntry {
+
+    private int index;
 
     private String name = "";
 
@@ -25,8 +29,13 @@ public final class ConvertColumnEntry {
     public ConvertColumnEntry(ConvertColumn column) {
         if (column == null) return;
         this.name = column.name();
+        this.index = column.index();
         this.ignore = column.ignore();
         this.convertType = column.type();
+    }
+
+    public ConvertColumnEntry(String name) {
+        this(name, false);
     }
 
     public ConvertColumnEntry(String name, boolean ignore) {
@@ -37,6 +46,13 @@ public final class ConvertColumnEntry {
 
     public ConvertColumnEntry(String name, boolean ignore, ConvertType convertType) {
         this.name = name;
+        this.ignore = ignore;
+        this.convertType = convertType;
+    }
+
+    public ConvertColumnEntry(String name, int index, boolean ignore, ConvertType convertType) {
+        this.name = name;
+        this.index = index;
         this.ignore = ignore;
         this.convertType = convertType;
     }
@@ -63,6 +79,19 @@ public final class ConvertColumnEntry {
 
     public void setConvertType(ConvertType convertType) {
         this.convertType = convertType;
+    }
+
+    public int getIndex() {
+        return index;
+    }
+
+    public void setIndex(int index) {
+        this.index = index;
+    }
+
+    @Override
+    public String toString() {
+        return "ConvertColumnEntry{" + "index=" + index + ", name=" + name + ", ignore=" + ignore + ", convertType=" + convertType + '}';
     }
 
 }

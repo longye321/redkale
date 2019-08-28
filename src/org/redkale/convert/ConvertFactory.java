@@ -5,21 +5,25 @@
  */
 package org.redkale.convert;
 
+import java.io.File;
 import java.lang.reflect.*;
-import java.math.BigInteger;
+import java.math.*;
 import java.net.*;
+import java.nio.ByteBuffer;
 import java.nio.channels.CompletionHandler;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.*;
 import java.util.regex.Pattern;
-import org.redkale.convert.ext.InetAddressSimpledCoder.InetSocketAddressSimpledCoder;
+import java.util.stream.*;
 import org.redkale.convert.ext.*;
 import org.redkale.util.*;
 
 /**
+ * 序列化模块的工厂类，用于注册自定义的序列化类型，获取Convert
  *
  * <p>
- * 详情见: http://redkale.org
+ * 详情见: https://redkale.org
  *
  * @author zhangjx
  * @param <R> Reader输入的子类
@@ -41,6 +45,8 @@ public abstract class ConvertFactory<R extends Reader, W extends Writer> {
 
     private final ConcurrentHashMap<String, Class> entitys = new ConcurrentHashMap();
 
+    private final ConcurrentHashMap<Type, Map<String, SimpledCoder<R, W, ?>>> fieldCoders = new ConcurrentHashMap();
+
     private final ConcurrentHashMap<Type, Decodeable<R, ?>> decoders = new ConcurrentHashMap();
 
     private final ConcurrentHashMap<Type, Encodeable<W, ?>> encoders = new ConcurrentHashMap();
@@ -48,6 +54,9 @@ public abstract class ConvertFactory<R extends Reader, W extends Writer> {
     private final ConcurrentHashMap<AccessibleObject, ConvertColumnEntry> columnEntrys = new ConcurrentHashMap();
 
     private final Set<Class> skipIgnores = new HashSet();
+
+    //key:需要屏蔽的字段；value：排除的字段名
+    private final ConcurrentHashMap<Class, Set<String>> ignoreAlls = new ConcurrentHashMap();
 
     private boolean skipAllIgnore = false;
 
@@ -82,28 +91,48 @@ public abstract class ConvertFactory<R extends Reader, W extends Writer> {
 
             this.register(Number.class, NumberSimpledCoder.instance);
             this.register(String.class, StringSimpledCoder.instance);
+            this.register(StringConvertWrapper.class, StringConvertWrapperSimpledCoder.instance);
             this.register(CharSequence.class, CharSequenceSimpledCoder.instance);
+            this.register(StringBuilder.class, CharSequenceSimpledCoder.StringBuilderSimpledCoder.instance);
             this.register(java.util.Date.class, DateSimpledCoder.instance);
+            this.register(java.time.Duration.class, DurationSimpledCoder.instance);
+            this.register(AtomicInteger.class, AtomicIntegerSimpledCoder.instance);
+            this.register(AtomicLong.class, AtomicLongSimpledCoder.instance);
             this.register(BigInteger.class, BigIntegerSimpledCoder.instance);
+            this.register(BigDecimal.class, BigDecimalSimpledCoder.instance);
             this.register(InetAddress.class, InetAddressSimpledCoder.instance);
             this.register(DLong.class, DLongSimpledCoder.instance);
             this.register(Class.class, TypeSimpledCoder.instance);
-            this.register(InetSocketAddress.class, InetSocketAddressSimpledCoder.instance);
+            this.register(InetSocketAddress.class, InetAddressSimpledCoder.InetSocketAddressSimpledCoder.instance);
             this.register(Pattern.class, PatternSimpledCoder.instance);
+            this.register(File.class, FileSimpledCoder.instance);
             this.register(CompletionHandler.class, CompletionHandlerSimpledCoder.instance);
             this.register(URL.class, URLSimpledCoder.instance);
             this.register(URI.class, URISimpledCoder.instance);
             //---------------------------------------------------------
+            this.register(ByteBuffer.class, ByteBufferSimpledCoder.instance);
             this.register(boolean[].class, BoolArraySimpledCoder.instance);
             this.register(byte[].class, ByteArraySimpledCoder.instance);
             this.register(short[].class, ShortArraySimpledCoder.instance);
             this.register(char[].class, CharArraySimpledCoder.instance);
             this.register(int[].class, IntArraySimpledCoder.instance);
+            this.register(IntStream.class, IntArraySimpledCoder.IntStreamSimpledCoder.instance);
             this.register(long[].class, LongArraySimpledCoder.instance);
+            this.register(LongStream.class, LongArraySimpledCoder.LongStreamSimpledCoder.instance);
             this.register(float[].class, FloatArraySimpledCoder.instance);
             this.register(double[].class, DoubleArraySimpledCoder.instance);
+            this.register(DoubleStream.class, DoubleArraySimpledCoder.DoubleStreamSimpledCoder.instance);
             this.register(String[].class, StringArraySimpledCoder.instance);
             //---------------------------------------------------------
+            this.register(AnyValue.class, Creator.create(AnyValue.DefaultAnyValue.class));
+            this.register(HttpCookie.class, new Creator<HttpCookie>() {
+                @Override
+                @ConstructorParameters({"name", "value"})
+                public HttpCookie create(Object... params) {
+                    return new HttpCookie((String) params[0], (String) params[1]);
+                }
+
+            });
         }
     }
 
@@ -113,11 +142,57 @@ public abstract class ConvertFactory<R extends Reader, W extends Writer> {
 
     public abstract ConvertType getConvertType();
 
-    public abstract boolean isReversible();
+    public abstract boolean isReversible(); //是否可逆的
+
+    public abstract boolean isFieldSort(); //当ConvertColumn.index相同时是否按字段名称排序
 
     public abstract ConvertFactory createChild();
 
     public abstract ConvertFactory createChild(boolean tiny);
+
+    protected SimpledCoder createEnumSimpledCoder(Class enumClass) {
+        return new EnumSimpledCoder(enumClass);
+    }
+
+    protected ObjectDecoder createObjectDecoder(Type type) {
+        return new ObjectDecoder(type);
+    }
+
+    protected ObjectEncoder createObjectEncoder(Type type) {
+        return new ObjectEncoder(type);
+    }
+
+    protected <E> Decodeable<R, E> createMapDecoder(Type type) {
+        return new MapDecoder(this, type);
+    }
+
+    protected <E> Encodeable<W, E> createMapEncoder(Type type) {
+        return new MapEncoder(this, type);
+    }
+
+    protected <E> Decodeable<R, E> createArrayDecoder(Type type) {
+        return new ArrayDecoder(this, type);
+    }
+
+    protected <E> Encodeable<W, E> createArrayEncoder(Type type) {
+        return new ArrayEncoder(this, type);
+    }
+
+    protected <E> Decodeable<R, E> createCollectionDecoder(Type type) {
+        return new CollectionDecoder(this, type);
+    }
+
+    protected <E> Encodeable<W, E> createCollectionEncoder(Type type) {
+        return new CollectionEncoder(this, type);
+    }
+
+    protected <E> Decodeable<R, E> createStreamDecoder(Type type) {
+        return new StreamDecoder(this, type);
+    }
+
+    protected <E> Encodeable<W, E> createStreamEncoder(Type type) {
+        return new StreamEncoder(this, type);
+    }
 
     public Convert getConvert() {
         return convert;
@@ -128,15 +203,36 @@ public abstract class ConvertFactory<R extends Reader, W extends Writer> {
         return this;
     }
 
-    public ConvertColumnEntry findRef(AccessibleObject element) {
-        if (element == null) return null;
-        ConvertColumnEntry en = this.columnEntrys.get(element);
-        if (en != null) return en;
-        final ConvertType ct = this.getConvertType();
-        ConvertColumn[] ccs = element.getAnnotationsByType(ConvertColumn.class);
+    public boolean isConvertDisabled(AccessibleObject element) {
+        ConvertDisabled[] ccs = element.getAnnotationsByType(ConvertDisabled.class);
         if (ccs.length == 0 && element instanceof Method) {
             final Method method = (Method) element;
             String fieldName = readGetSetFieldName(method);
+            if (fieldName != null) {
+                try {
+                    ccs = method.getDeclaringClass().getDeclaredField(fieldName).getAnnotationsByType(ConvertDisabled.class);
+                } catch (Exception e) { //说明没有该字段，忽略异常
+                }
+            }
+        }
+        final ConvertType ct = this.getConvertType();
+        for (ConvertDisabled ref : ccs) {
+            if (ref.type().contains(ct)) return true;
+        }
+        return false;
+    }
+
+    public ConvertColumnEntry findRef(Class clazz, AccessibleObject element) {
+        if (element == null) return null;
+        ConvertColumnEntry en = this.columnEntrys.get(element);
+        Set<String> onlyColumns = ignoreAlls.get(clazz);
+        if (en != null && onlyColumns == null) return en;
+        final ConvertType ct = this.getConvertType();
+        ConvertColumn[] ccs = element.getAnnotationsByType(ConvertColumn.class);
+        String fieldName = null;
+        if (ccs.length == 0 && element instanceof Method) {
+            final Method method = (Method) element;
+            fieldName = readGetSetFieldName(method);
             if (fieldName != null) {
                 try {
                     ccs = method.getDeclaringClass().getDeclaredField(fieldName).getAnnotationsByType(ConvertColumn.class);
@@ -144,14 +240,31 @@ public abstract class ConvertFactory<R extends Reader, W extends Writer> {
                 }
             }
         }
+        if (onlyColumns != null && fieldName == null) {
+            if (element instanceof Method) {
+                fieldName = readGetSetFieldName((Method) element);
+            } else if (element instanceof Field) {
+                fieldName = ((Field) element).getName();
+            }
+        }
+        if (ccs.length == 0 && onlyColumns != null && fieldName != null) {
+            if (!onlyColumns.contains(fieldName)) return new ConvertColumnEntry(fieldName, true);
+        }
         for (ConvertColumn ref : ccs) {
             if (ref.type().contains(ct)) {
+                String realName = ref.name().isEmpty() ? fieldName : ref.name();
+                if (onlyColumns != null && fieldName != null) {
+                    if (!onlyColumns.contains(realName)) return new ConvertColumnEntry(realName, true);
+                }
                 ConvertColumnEntry entry = new ConvertColumnEntry(ref);
                 if (skipAllIgnore) {
                     entry.setIgnore(false);
                     return entry;
                 }
-                if (skipIgnores.isEmpty()) return entry;
+                if (skipIgnores.isEmpty()) {
+                    if (onlyColumns != null && realName != null && onlyColumns.contains(realName)) entry.setIgnore(false);
+                    return entry;
+                }
                 if (skipIgnores.contains(((Member) element).getDeclaringClass())) entry.setIgnore(false);
                 return entry;
             }
@@ -173,15 +286,71 @@ public abstract class ConvertFactory<R extends Reader, W extends Writer> {
     }
 
     final String getEntityAlias(Class clazz) {
+        if (clazz == String.class) return "A";
+        if (clazz == int.class) return "I";
+        if (clazz == Integer.class) return "i";
+        if (clazz == long.class) return "J";
+        if (clazz == Long.class) return "j";
+        if (clazz == byte.class) return "B";
+        if (clazz == Byte.class) return "b";
+        if (clazz == boolean.class) return "Z";
+        if (clazz == Boolean.class) return "z";
+        if (clazz == short.class) return "S";
+        if (clazz == Short.class) return "s";
+        if (clazz == char.class) return "C";
+        if (clazz == Character.class) return "c";
+        if (clazz == float.class) return "F";
+        if (clazz == Float.class) return "f";
+        if (clazz == double.class) return "D";
+        if (clazz == Double.class) return "d";
+
+        if (clazz == String[].class) return "[A";
+        if (clazz == int[].class) return "[I";
+        if (clazz == long[].class) return "[J";
+        if (clazz == byte[].class) return "[B";
+        if (clazz == boolean[].class) return "[Z";
+        if (clazz == short[].class) return "[S";
+        if (clazz == char[].class) return "[C";
+        if (clazz == float[].class) return "[F";
+        if (clazz == double[].class) return "[D";
+
         ConvertEntity ce = (ConvertEntity) clazz.getAnnotation(ConvertEntity.class);
         if (ce != null && findEntityAlias(ce.value()) == null) entitys.put(ce.value(), clazz);
         return ce == null ? clazz.getName() : ce.value();
     }
 
     final Class getEntityAlias(String name) {
+        if ("A".equals(name)) return String.class;
+        if ("I".equals(name)) return int.class;
+        if ("i".equals(name)) return Integer.class;
+        if ("J".equals(name)) return long.class;
+        if ("j".equals(name)) return Long.class;
+        if ("B".equals(name)) return byte.class;
+        if ("b".equals(name)) return Byte.class;
+        if ("Z".equals(name)) return boolean.class;
+        if ("z".equals(name)) return Boolean.class;
+        if ("S".equals(name)) return short.class;
+        if ("s".equals(name)) return Short.class;
+        if ("C".equals(name)) return char.class;
+        if ("c".equals(name)) return Character.class;
+        if ("F".equals(name)) return float.class;
+        if ("f".equals(name)) return Float.class;
+        if ("D".equals(name)) return double.class;
+        if ("d".equals(name)) return Double.class;
+
+        if ("[A".equals(name)) return String[].class;
+        if ("[I".equals(name)) return int[].class;
+        if ("[J".equals(name)) return long[].class;
+        if ("[B".equals(name)) return byte[].class;
+        if ("[Z".equals(name)) return boolean[].class;
+        if ("[S".equals(name)) return short[].class;
+        if ("[C".equals(name)) return char[].class;
+        if ("[F".equals(name)) return float[].class;
+        if ("[D".equals(name)) return double[].class;
+
         Class clazz = findEntityAlias(name);
         try {
-            return clazz == null ? Class.forName(name) : clazz;
+            return clazz == null ? Thread.currentThread().getContextClassLoader().loadClass(name) : clazz;
         } catch (Exception ex) {
             throw new ConvertException("convert entity is " + name, ex);
         }
@@ -202,6 +371,18 @@ public abstract class ConvertFactory<R extends Reader, W extends Writer> {
     }
 
     /**
+     * 使所有类的所有被声明为ConvertColumn.ignore = true 的字段或方法变为ConvertColumn.ignore = false
+     *
+     * @param skipIgnore 忽略ignore
+     *
+     * @return 自身
+     */
+    public ConvertFactory<R, W> skipAllIgnore(final boolean skipIgnore) {
+        this.skipAllIgnore = skipIgnore;
+        return this;
+    }
+
+    /**
      * 使该类所有被声明为ConvertColumn.ignore = true 的字段或方法变为ConvertColumn.ignore = false
      *
      * @param type 指定的类
@@ -210,33 +391,75 @@ public abstract class ConvertFactory<R extends Reader, W extends Writer> {
         skipIgnores.add(type);
     }
 
+    /**
+     * 屏蔽指定类所有字段，仅仅保留指定字段 <br>
+     * <b>注意: 该配置优先级高于skipAllIgnore和ConvertColumnEntry配置</b>
+     *
+     * @param type           指定的类
+     * @param excludeColumns 需要排除的字段名
+     */
+    public final void registerIgnoreAll(final Class type, String... excludeColumns) {
+        Set<String> set = ignoreAlls.get(type);
+        if (set == null) {
+            ignoreAlls.put(type, new HashSet<>(Arrays.asList(excludeColumns)));
+        } else {
+            set.addAll(Arrays.asList(excludeColumns));
+        }
+    }
+
+    public final void registerIgnoreAll(final Class type, Collection<String> excludeColumns) {
+        Set<String> set = ignoreAlls.get(type);
+        if (set == null) {
+            ignoreAlls.put(type, new HashSet<>(excludeColumns));
+        } else {
+            set.addAll(new ArrayList(excludeColumns));
+        }
+    }
+
     public final void register(final Class type, boolean ignore, String... columns) {
         for (String column : columns) {
             register(type, column, new ConvertColumnEntry(column, ignore));
         }
     }
 
+    public final void register(final Class type, boolean ignore, Collection<String> columns) {
+        for (String column : columns) {
+            register(type, column, new ConvertColumnEntry(column, ignore));
+        }
+    }
+
+    public final boolean register(final Class type, String column, String alias) {
+        return register(type, column, new ConvertColumnEntry(alias));
+    }
+
     public final boolean register(final Class type, String column, ConvertColumnEntry entry) {
         if (type == null || column == null || entry == null) return false;
+        Field field = null;
         try {
-            final Field field = type.getDeclaredField(column);
-            String get = "get";
-            if (field.getType() == boolean.class || field.getType() == Boolean.class) get = "is";
-            char[] cols = column.toCharArray();
-            cols[0] = Character.toUpperCase(cols[0]);
-            String col2 = new String(cols);
-            try {
-                register(type.getMethod(get + col2), entry);
-            } catch (Exception ex) {
-            }
-            try {
-                register(type.getMethod("set" + col2, field.getType()), entry);
-            } catch (Exception ex) {
-            }
-            return register(field, entry);
+            field = type.getDeclaredField(column);
         } catch (Exception e) {
-            return false;
         }
+        String get = "get";
+        if (field != null && (field.getType() == boolean.class || field.getType() == Boolean.class)) get = "is";
+        char[] cols = column.toCharArray();
+        cols[0] = Character.toUpperCase(cols[0]);
+        final String bigColumn = new String(cols);
+        try {
+            register(type.getMethod(get + bigColumn), entry);
+        } catch (NoSuchMethodException mex) {
+            if (get.length() >= 3) { //get
+                try {
+                    register(type.getMethod("is" + bigColumn), entry);
+                } catch (Exception ex) {
+                }
+            }
+        } catch (Exception ex) {
+        }
+        try {
+            register(type.getMethod("set" + bigColumn, field.getType()), entry);
+        } catch (Exception ex) {
+        }
+        return field == null ? true : register(field, entry);
     }
 
     public final <E> boolean register(final AccessibleObject field, final ConvertColumnEntry entry) {
@@ -284,12 +507,40 @@ public abstract class ConvertFactory<R extends Reader, W extends Writer> {
         encoders.put(clazz, coder);
     }
 
+    public final <E> void register(final Type clazz, final Decodeable<R, E> decoder, final Encodeable<W, E> encoder) {
+        decoders.put(clazz, decoder);
+        encoders.put(clazz, encoder);
+    }
+
     public final <E> void register(final Type clazz, final Decodeable<R, E> decoder) {
         decoders.put(clazz, decoder);
     }
 
-    public final <E> void register(final Type clazz, final Encodeable<W, E> printer) {
-        encoders.put(clazz, printer);
+    public final <E> void register(final Type clazz, final Encodeable<W, E> encoder) {
+        encoders.put(clazz, encoder);
+    }
+
+    //coder = null表示删除该字段的指定SimpledCoder
+    public final <E> void register(final Class clazz, final String field, final SimpledCoder<R, W, E> coder) {
+        if (field == null || clazz == null) return;
+        try {
+            clazz.getDeclaredField(field);
+        } catch (Exception e) {
+            throw new RuntimeException(clazz + " not found field(" + field + ")");
+        }
+        if (coder == null) {
+            Map map = this.fieldCoders.get(clazz);
+            if (map != null) map.remove(field);
+        } else {
+            this.fieldCoders.computeIfAbsent(clazz, c -> new ConcurrentHashMap<>()).put(field, coder);
+        }
+    }
+
+    public final <E> SimpledCoder<R, W, E> findFieldCoder(final Type clazz, final String field) {
+        if (field == null) return null;
+        Map<String, SimpledCoder<R, W, ?>> map = this.fieldCoders.get(clazz);
+        if (map == null) return parent == null ? null : parent.findFieldCoder(clazz, field);
+        return (SimpledCoder) map.get(field);
     }
 
     public final <E> Decodeable<R, E> findDecoder(final Type type) {
@@ -307,7 +558,7 @@ public abstract class ConvertFactory<R extends Reader, W extends Writer> {
     public final <E> Decodeable<R, E> loadDecoder(final Type type) {
         Decodeable<R, E> decoder = findDecoder(type);
         if (decoder != null) return decoder;
-        if (type instanceof GenericArrayType) return new ArrayDecoder(this, type);
+        if (type instanceof GenericArrayType) return createArrayDecoder(type);
         Class clazz;
         if (type instanceof ParameterizedType) {
             final ParameterizedType pts = (ParameterizedType) type;
@@ -339,8 +590,7 @@ public abstract class ConvertFactory<R extends Reader, W extends Writer> {
         } else {
             throw new ConvertException("not support the type (" + type + ")");
         }
-        decoder = findDecoder(clazz);
-        if (decoder != null) return decoder;
+        //此处不能再findDecoder，否则type与class不一致, 如: RetResult 和 RetResult<Integer>
         return createDecoder(type, clazz);
     }
 
@@ -361,17 +611,24 @@ public abstract class ConvertFactory<R extends Reader, W extends Writer> {
         Decodeable<R, E> decoder = null;
         ObjectDecoder od = null;
         if (clazz.isEnum()) {
-            decoder = new EnumSimpledCoder(clazz);
+            decoder = createEnumSimpledCoder(clazz);
         } else if (clazz.isArray()) {
-            decoder = new ArrayDecoder(this, type);
+            decoder = createArrayDecoder(type);
         } else if (Collection.class.isAssignableFrom(clazz)) {
-            decoder = new CollectionDecoder(this, type);
+            decoder = createCollectionDecoder(type);
+        } else if (Stream.class.isAssignableFrom(clazz)) {
+            decoder = createStreamDecoder(type);
         } else if (Map.class.isAssignableFrom(clazz)) {
-            decoder = new MapDecoder(this, type);
+            decoder = createMapDecoder(type);
+        } else if (Optional.class == clazz) {
+            decoder = new OptionalCoder(this, type);
         } else if (clazz == Object.class) {
-            od = new ObjectDecoder(type);
+            od = createObjectDecoder(type);
             decoder = od;
-        } else if (!clazz.getName().startsWith("java.")) {
+        } else if (!clazz.getName().startsWith("java.")
+            || java.net.HttpCookie.class == clazz
+            || java.util.AbstractMap.SimpleEntry.class == clazz
+            || clazz.getName().startsWith("java.awt.geom.Point2D")) {
             Decodeable simpleCoder = null;
             for (final Method method : clazz.getDeclaredMethods()) {
                 if (!Modifier.isStatic(method.getModifiers())) continue;
@@ -387,7 +644,7 @@ public abstract class ConvertFactory<R extends Reader, W extends Writer> {
                 }
             }
             if (simpleCoder == null) {
-                od = new ObjectDecoder(type);
+                od = createObjectDecoder(type);
                 decoder = od;
             } else {
                 decoder = simpleCoder;
@@ -402,7 +659,7 @@ public abstract class ConvertFactory<R extends Reader, W extends Writer> {
     public final <E> Encodeable<W, E> loadEncoder(final Type type) {
         Encodeable<W, E> encoder = findEncoder(type);
         if (encoder != null) return encoder;
-        if (type instanceof GenericArrayType) return new ArrayEncoder(this, type);
+        if (type instanceof GenericArrayType) return createArrayEncoder(type);
         Class clazz;
         if (type instanceof ParameterizedType) {
             final ParameterizedType pts = (ParameterizedType) type;
@@ -420,8 +677,7 @@ public abstract class ConvertFactory<R extends Reader, W extends Writer> {
         } else {
             throw new ConvertException("not support the type (" + type + ")");
         }
-        encoder = findEncoder(clazz);
-        if (encoder != null) return encoder;
+        //此处不能再findEncoder，否则type与class不一致, 如: RetResult 和 RetResult<Integer> 
         return createEncoder(type, clazz);
     }
 
@@ -442,16 +698,20 @@ public abstract class ConvertFactory<R extends Reader, W extends Writer> {
         Encodeable<W, E> encoder = null;
         ObjectEncoder oe = null;
         if (clazz.isEnum()) {
-            encoder = new EnumSimpledCoder(clazz);
+            encoder = createEnumSimpledCoder(clazz);
         } else if (clazz.isArray()) {
-            encoder = new ArrayEncoder(this, type);
+            encoder = createArrayEncoder(type);
         } else if (Collection.class.isAssignableFrom(clazz)) {
-            encoder = new CollectionEncoder(this, type);
+            encoder = createCollectionEncoder(type);
+        } else if (Stream.class.isAssignableFrom(clazz)) {
+            encoder = createStreamEncoder(type);
         } else if (Map.class.isAssignableFrom(clazz)) {
-            encoder = new MapEncoder(this, type);
+            encoder = createMapEncoder(type);
+        } else if (Optional.class == clazz) {
+            encoder = new OptionalCoder(this, type);
         } else if (clazz == Object.class) {
             return (Encodeable<W, E>) this.anyEncoder;
-        } else if (!clazz.getName().startsWith("java.")) {
+        } else if (!clazz.getName().startsWith("java.") || java.net.HttpCookie.class == clazz || java.util.AbstractMap.SimpleEntry.class == clazz) {
             Encodeable simpleCoder = null;
             for (final Method method : clazz.getDeclaredMethods()) {
                 if (!Modifier.isStatic(method.getModifiers())) continue;
@@ -467,7 +727,7 @@ public abstract class ConvertFactory<R extends Reader, W extends Writer> {
                 }
             }
             if (simpleCoder == null) {
-                oe = new ObjectEncoder(type);
+                oe = createObjectEncoder(type);
                 encoder = oe;
             } else {
                 encoder = simpleCoder;
